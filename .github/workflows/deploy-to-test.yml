@@ -1,0 +1,51 @@
+name: Deploy to Test (on stage)
+
+on:
+  push:
+    branches: [stage]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_deploy_test:
+    runs-on: ubuntu-latest
+    environment: stage
+    env:
+      BUILD_DIR: dist
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck --if-present
+      - run: npm run lint --if-present
+      - run: npm run build:test
+        env:
+          VITE_ORG_API_ENDPOINT: ${{ vars.VITE_ORG_API_ENDPOINT }}
+          VITE_ORG_CODE: ${{ vars.VITE_ORG_CODE }}
+          VITE_CLIENT_ID: ${{ vars.VITE_CLIENT_ID }}
+          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate deploy variables
+        run: test -n "${{ vars.S3_BUCKET_STAGE }}" -a -n "${{ vars.CF_ID_STAGE }}"
+
+      - name: Sync to S3 (test)
+        run: aws s3 sync "$BUILD_DIR/" "s3://${{ vars.S3_BUCKET_STAGE }}/" --delete
+
+      - name: Invalidate CloudFront (test)
+        run: aws cloudfront create-invalidation --distribution-id "${{ vars.CF_ID_STAGE }}" --paths "/*"

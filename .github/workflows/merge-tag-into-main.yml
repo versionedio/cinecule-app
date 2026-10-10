@@ -1,0 +1,114 @@
+name: Merge Tag into Main
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to merge into main (e.g., v1.2.3)'
+        required: true
+      expectedTarget:
+        description: 'Expected branch the tag came from (for sanity check)'
+        required: false
+        default: 'stage'
+
+permissions:
+  contents: write   # push to main
+
+jobs:
+  merge_ff_only:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (full history)
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0   # need full history + tags
+
+      - name: Fetch tags and expected branch
+        run: |
+          git fetch --tags --prune
+          git fetch origin "${{ github.event.inputs.expectedTarget }}" --depth=0 || true
+
+      - name: Validate tag & fast-forward possibility
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          TARGET="${{ github.event.inputs.expectedTarget || 'stage' }}"
+
+          # Basic semver-ish check (matches your other workflows)
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.\-]+)?$ ]]; then
+            echo "Tag $TAG must look like v1.2.3 (optionally with -rc.x)."
+            exit 1
+          fi
+
+          # Ensure the tag exists locally
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG not found locally; fetching…"
+            git fetch --tags --prune
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "❌ Tag $TAG still not found after fetch."
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          MAIN_SHA="$(git rev-parse HEAD)"
+
+          echo "Tag $TAG resolves to $TAG_SHA"
+          echo "main currently at $MAIN_SHA"
+
+          # Optional sanity: ensure the tag commit is reachable from TARGET (stage)
+          if git rev-parse -q --verify "refs/remotes/origin/$TARGET" >/dev/null; then
+            if ! git merge-base --is-ancestor "$TAG_SHA" "origin/$TARGET"; then
+              echo "❌ Sanity check failed: $TAG_SHA is not reachable from origin/$TARGET."
+              echo "    Make sure the tag was created from $TARGET or override 'expectedTarget'."
+              exit 1
+            fi
+          else
+            echo "⚠️ Could not verify reachability from $TARGET (branch not fetched). Continuing."
+          fi
+
+          # Ensure FF-only is possible (main must be ancestor of the tag)
+          if git merge-base --is-ancestor "$MAIN_SHA" "$TAG_SHA"; then
+            echo "✅ Fast-forward from main to $TAG is possible."
+          else
+            echo "❌ Fast-forward NOT possible."
+            echo "   main contains commits not in $TAG, or histories diverged."
+            echo "   Options:"
+            echo "   - Move main forward via PR to the tag commit"
+            echo "   - Or rebase/cherry-pick as appropriate"
+            exit 1
+          fi
+
+          echo "TAG_SHA=$TAG_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Merge tag into main (FF only)
+        run: |
+          git merge --ff-only "${{ steps.guard.outputs.TAG_SHA }}"
+          git push origin main
+
+      - name: Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = core.getInput('tag');
+            const sha = process.env.GITHUB_SHA; // SHA of merge commit (same as tag after FF)
+            const compareUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/compare/main...${tag}`;
+            let releaseUrl = '';
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner, repo: context.repo.repo, tag
+              });
+              releaseUrl = data.html_url || '';
+            } catch {}
+            const lines = [
+              `### 🔗 Merged tag **${tag}** into **main** (fast-forward)`,
+              ``,
+              `- Tag: **${tag}**`,
+              `- Commit: \`${sha}\``,
+              releaseUrl ? `- Release: ${releaseUrl}` : `- Release: (none)`,
+              `- Compare: ${compareUrl}`,
+            ];
+            await core.summary.addRaw(lines.join('\n') + '\n').write();

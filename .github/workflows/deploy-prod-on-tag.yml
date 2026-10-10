@@ -1,0 +1,66 @@
+name: Deploy to Prod (on tag)
+
+# Direct tag push, or manual redeploy/rollback of an existing tag.
+# The normal path is publish-release-tag.yml, which builds and deploys in the same run.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Exact tag to deploy (e.g., v1.2.3)'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: prod
+  cancel-in-progress: false
+
+jobs:
+  deploy_prod:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      BUILD_DIR: dist
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate tag
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag '$TAG' must look like v1.2.3"; exit 1; }
+
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck --if-present
+      - run: npm run lint --if-present
+      - run: npm run build:ci
+        env:
+          VITE_ORG_API_ENDPOINT: ${{ vars.VITE_ORG_API_ENDPOINT }}
+          VITE_ORG_CODE: ${{ vars.VITE_ORG_CODE }}
+          VITE_CLIENT_ID: ${{ vars.VITE_CLIENT_ID }}
+          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate deploy variables
+        run: test -n "${{ vars.S3_BUCKET_PROD }}" -a -n "${{ vars.CF_ID_PROD }}"
+
+      - name: Sync to S3 (prod)
+        run: aws s3 sync "$BUILD_DIR/" "s3://${{ vars.S3_BUCKET_PROD }}/" --delete
+
+      - name: Invalidate CloudFront (prod)
+        run: aws cloudfront create-invalidation --distribution-id "${{ vars.CF_ID_PROD }}" --paths "/*"
