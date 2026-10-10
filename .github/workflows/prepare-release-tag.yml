@@ -1,0 +1,85 @@
+name: Prepare Release Tag(draft)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (semver, e.g., v1.2.3)'
+        required: true
+      target:
+        description: 'Target ref (defaults to stage)'
+        required: false
+        default: 'stage'
+      title:
+        description: 'Release title (default: same as tag)'
+        required: false
+      notes:
+        description: 'Release notes (optional)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  draft_release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug inputs
+        run: echo "inputs=${{ toJson(github.event.inputs) }}"
+
+      - name: Create draft release for tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const inputs = context.payload.inputs || {};
+            const tag    = (inputs.tag    || '').trim();
+            const target = (inputs.target || 'stage').trim();
+            const name   = (inputs.title  || tag).trim();
+            const body   = (inputs.notes  || '');
+
+            if (!tag) {
+              core.setFailed('No tag provided. Example: v1.0.0');
+              return;
+            }
+
+            const semverLike = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+            if (!semverLike.test(tag)) {
+              core.setFailed(`Tag "${tag}" must look like v1.2.3 (optionally with -rc.x).`);
+              return;
+            }
+
+            // Fail if tag already exists
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`
+              });
+              core.setFailed(`Tag "${tag}" already exists.`);
+              return;
+            } catch {}
+
+            // Ensure target branch exists
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `heads/${target}`
+              });
+            } catch {
+              core.setFailed(`Target branch "${target}" not found.`);
+              return;
+            }
+
+            const resp = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              target_commitish: target,
+              name,
+              body,
+              draft: true,
+              prerelease: false
+            });
+
+            core.info(`Draft release created for ${tag}: ${resp.data.html_url}`);

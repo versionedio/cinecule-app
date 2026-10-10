@@ -1,0 +1,140 @@
+name: Publish Release Tag + Deploy to Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing draft tag (e.g., v1.2.3)'
+        required: true
+      expectedTarget:
+        description: 'Expected target branch for this draft'
+        required: true
+        default: 'stage'
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  publish_release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug inputs
+        run: echo "inputs=${{ toJson(github.event.inputs) }}"
+
+      - name: Publish draft release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const inputs = context.payload.inputs || {};
+            const tag = (inputs.tag || '').trim();
+            const expectedTarget = (inputs.expectedTarget || 'stage').trim();
+
+            if (!tag) {
+              core.setFailed('No tag provided. Example: v1.2.3');
+              return;
+            }
+
+            const semverLike = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+            if (!semverLike.test(tag)) {
+              core.setFailed(`Tag "${tag}" must look like v1.2.3 (optionally with -rc.x).`);
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Resolve the release for this tag — works whether it's a draft, already published,
+            // or only a git tag. Only a tag that doesn't exist at all is a hard error.
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const draft     = releases.find(r => r.tag_name === tag && r.draft === true);
+            const published = releases.find(r => r.tag_name === tag && r.draft === false);
+
+            if (draft) {
+              // Verify expected target
+              const target = (draft.target_commitish || '').trim();
+              if (target !== expectedTarget) {
+                core.setFailed(`Draft "${tag}" target is "${target}", expected "${expectedTarget}".`);
+                return;
+              }
+
+              // Verify expected branch exists and get HEAD
+              const stageRef = await github.rest.git.getRef({ owner, repo, ref: `heads/${expectedTarget}` });
+              const stageSha = stageRef.data.object.sha;
+
+              // (Optional) warn if branch moved since draft creation
+              const headCommit = await github.rest.repos.getCommit({ owner, repo, ref: stageSha });
+              const headDate = new Date(headCommit.data.commit.author?.date || headCommit.data.commit.committer?.date);
+              const draftCreated = new Date(draft.created_at);
+              if (headDate > draftCreated) {
+                core.warning(`"${expectedTarget}" advanced after draft creation; publishing current HEAD.`);
+              }
+
+              // Publish draft → pushes tag at current expectedTarget HEAD
+              const resp = await github.rest.repos.updateRelease({
+                owner, repo, release_id: draft.id, draft: false
+              });
+              core.info(`Published release: ${resp.data.html_url}`);
+              core.info(`Tag "${tag}" created from "${expectedTarget}" at ${stageSha}.`);
+            } else if (published) {
+              core.info(`Tag "${tag}" is already published — skipping publish, proceeding to deploy.`);
+            } else {
+              // No release object, but allow if the git tag itself exists (deploy a raw tag).
+              try {
+                await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+                core.info(`No release for "${tag}", but the git tag exists — proceeding to deploy.`);
+              } catch {
+                core.setFailed(`No draft/published release and no git tag "${tag}". Run "Prepare Release Tag (draft)" first.`);
+                return;
+              }
+            }
+
+  # Deploys the just-published tag to prod in the SAME run. (A workflow can't trigger another via
+  # GITHUB_TOKEN, so the old "publish → release event → deploy-prod-on-tag" chain was suppressed.)
+  deploy_prod:
+    needs: publish_release
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      BUILD_DIR: dist
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ github.event.inputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck --if-present
+      - run: npm run lint --if-present
+      - run: npm run build:ci
+        env:
+          VITE_ORG_API_ENDPOINT: ${{ vars.VITE_ORG_API_ENDPOINT }}
+          VITE_ORG_CODE: ${{ vars.VITE_ORG_CODE }}
+          VITE_CLIENT_ID: ${{ vars.VITE_CLIENT_ID }}
+          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+
+      - name: Verify build output
+        run: ls -la "$BUILD_DIR"
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate deploy variables
+        run: |
+          test -n "${{ vars.S3_BUCKET_PROD }}" && test -n "${{ vars.CF_ID_PROD }}" \
+            || { echo "❌ Missing S3_BUCKET_PROD or CF_ID_PROD"; exit 1; }
+
+      - name: Sync to S3 (prod)
+        run: aws s3 sync "$BUILD_DIR/" "s3://${{ vars.S3_BUCKET_PROD }}/" --delete
+
+      - name: Invalidate CloudFront (prod)
+        run: aws cloudfront create-invalidation --distribution-id "${{ vars.CF_ID_PROD }}" --paths "/*"

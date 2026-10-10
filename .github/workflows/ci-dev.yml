@@ -1,0 +1,73 @@
+name: CI & Deploy (dev)
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck --if-present
+      - run: npm run lint --if-present
+      - run: npm run build:dev
+        env:
+          VITE_ORG_API_ENDPOINT: ${{ vars.VITE_ORG_API_ENDPOINT }}
+          VITE_ORG_CODE: ${{ vars.VITE_ORG_CODE }}
+          VITE_CLIENT_ID: ${{ vars.VITE_CLIENT_ID }}
+          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+
+  deploy_dev:
+    if: github.event_name == 'push' && github.ref_name == 'dev'
+    needs: build_test
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      BUILD_DIR: dist
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck --if-present
+      - run: npm run lint --if-present
+      - run: npm run build:dev
+        env:
+          VITE_ORG_API_ENDPOINT: ${{ vars.VITE_ORG_API_ENDPOINT }}
+          VITE_ORG_CODE: ${{ vars.VITE_ORG_CODE }}
+          VITE_CLIENT_ID: ${{ vars.VITE_CLIENT_ID }}
+          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate deploy variables
+        run: test -n "${{ vars.S3_BUCKET_DEV }}" -a -n "${{ vars.CF_ID_DEV }}"
+
+      - name: Sync to S3 (dev)
+        run: aws s3 sync "$BUILD_DIR/" "s3://${{ vars.S3_BUCKET_DEV }}/" --delete
+
+      - name: Invalidate CloudFront (dev)
+        run: aws cloudfront create-invalidation --distribution-id "${{ vars.CF_ID_DEV }}" --paths "/*"
