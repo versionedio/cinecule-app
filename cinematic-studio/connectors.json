@@ -1,0 +1,12 @@
+[
+  {
+    "name": "YouTube Upload",
+    "connectorId": "webhook",
+    "rationale": "No native YouTube connector exists on the platform, so this is a generic webhook connector pointing at your own worker service, which holds the channel's OAuth credentials and performs the resumable upload via the YouTube Data API v3. Configure the webhook URL to point at your worker's /publish endpoint. Used by the Assemble Final Video logicblock's final connector step."
+  },
+  {
+    "name": "S3 Storage",
+    "connectorId": "s3",
+    "rationale": "Native external.s3 connector. Each tenant supplies their own AWS credentials (access_key_id, secret_access_key, region, bucket) via PUT /app/{orgCode}/settings with group=connector, name=s3. Used to store TTS audio output and the rendered final video before/after the video-assembly step, and backs the s3 colType fields on Voiceover.audioFile and FinalVideo.videoFile."
+  }
+]

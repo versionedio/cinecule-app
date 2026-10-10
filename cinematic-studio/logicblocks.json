@@ -1,0 +1,2471 @@
+[
+  {
+    "apiname": "generate_storyboard_draft",
+    "api": {
+      "name": "generate_storyboard_draft",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "project_id",
+            "source": "query",
+            "required": true
+          },
+          {
+            "name": "debug",
+            "source": "query",
+            "required": false
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "project",
+          "config": {
+            "inputValue": "{{input._query.project_id}}",
+            "apiName": "project"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "condition",
+          "branches": [
+            {
+              "conditions": [
+                {
+                  "field": "{{project.status}}",
+                  "value": "generating_content",
+                  "operator": "=="
+                }
+              ],
+              "id": "b1",
+              "then": [
+                "s3",
+                "s4",
+                "s5",
+                "s6",
+                "s7",
+                "s8"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s_skip"
+          ],
+          "outputAs": "content_ready_branch",
+          "config": {},
+          "steps": [
+            {
+              "id": "s_skip",
+              "type": "end",
+              "outputAs": "skip_result",
+              "config": {},
+              "response": {
+                "status": "{{project.status}}",
+                "skipped": true
+              }
+            },
+            {
+              "id": "s3",
+              "type": "list_entities",
+              "outputAs": "sources",
+              "config": {
+                "apiName": "contentsource",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  },
+                  {
+                    "field": "status",
+                    "op": "eq",
+                    "value": "processed"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4",
+              "type": "create_variable",
+              "outputAs": "aggregated_text",
+              "config": {
+                "initialValue": "",
+                "varType": "string"
+              }
+            },
+            {
+              "id": "s5",
+              "type": "loop",
+              "outputAs": "source_loop",
+              "config": {
+                "listRef": "sources.items",
+                "maxIterations": 20
+              },
+              "steps": [
+                {
+                  "id": "s5a",
+                  "type": "set_variable",
+                  "outputAs": "append_source",
+                  "config": {
+                    "operation": "add",
+                    "value": "\n\n--- Source: {{source_loop.current_item.title}} ---\n{{source_loop.current_item.raw_text}}",
+                    "target": "aggregated_text"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s6",
+              "type": "ai_call",
+              "outputAs": "slides_result",
+              "config": {
+                "maxTokens": 4500,
+                "contextFields": [
+                  {
+                    "type": "text",
+                    "value": "{{aggregated_text}}",
+                    "label": "Combined source material"
+                  },
+                  {
+                    "type": "text",
+                    "value": "{{project.video_type}}",
+                    "label": "Target video type"
+                  }
+                ],
+                "outputFields": [
+                  {
+                    "name": "slides",
+                    "description": "Array of slide objects, each with html_content, narration_text, duration, transition, transition_duration, sort_order, and interactions[]"
+                  }
+                ],
+                "instructions": "SEE PROJECT_PLAN.md / live block for full prompt text",
+                "intent": "generate",
+                "outputFormat": "json"
+              }
+            },
+            {
+              "id": "s7",
+              "type": "loop",
+              "outputAs": "slides_loop",
+              "config": {
+                "listRef": "slides_result.response.slides",
+                "maxIterations": 12
+              },
+              "steps": [
+                {
+                  "id": "s7a",
+                  "type": "create_entity",
+                  "outputAs": "created_slide",
+                  "config": {
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{project.id}}"
+                      },
+                      {
+                        "field": "html_content",
+                        "value": "{{slides_loop.current_item.html_content}}"
+                      },
+                      {
+                        "field": "narration_text",
+                        "value": "{{slides_loop.current_item.narration_text}}"
+                      },
+                      {
+                        "field": "sort_order",
+                        "value": "{{slides_loop.index}}"
+                      },
+                      {
+                        "field": "duration",
+                        "value": "{{slides_loop.current_item.duration}}"
+                      },
+                      {
+                        "field": "transition",
+                        "value": "{{slides_loop.current_item.transition}}"
+                      },
+                      {
+                        "field": "transition_duration",
+                        "value": "{{slides_loop.current_item.transition_duration}}"
+                      }
+                    ],
+                    "apiName": "generatedhtml"
+                  }
+                },
+                {
+                  "id": "s7b",
+                  "type": "loop",
+                  "config": {
+                    "listRef": "slides_loop.current_item.interactions",
+                    "maxIterations": 3
+                  },
+                  "outputAs": "interactions_loop",
+                  "steps": [
+                    {
+                      "id": "s7c",
+                      "type": "create_entity",
+                      "config": {
+                        "fields": [
+                          {
+                            "field": "slide_id",
+                            "value": "{{created_slide.id}}"
+                          },
+                          {
+                            "field": "project_id",
+                            "value": "{{project.id}}"
+                          },
+                          {
+                            "field": "target_text",
+                            "value": "{{interactions_loop.current_item.target_text}}"
+                          },
+                          {
+                            "field": "action",
+                            "value": "{{interactions_loop.current_item.action}}"
+                          },
+                          {
+                            "field": "trigger",
+                            "value": "{{interactions_loop.current_item.trigger}}"
+                          },
+                          {
+                            "field": "time_offset",
+                            "value": "{{interactions_loop.current_item.time_offset}}"
+                          },
+                          {
+                            "field": "duration",
+                            "value": "{{interactions_loop.current_item.duration}}"
+                          },
+                          {
+                            "field": "label",
+                            "value": "{{interactions_loop.current_item.label}}"
+                          },
+                          {
+                            "field": "sort_order",
+                            "value": "{{interactions_loop.index}}"
+                          }
+                        ],
+                        "apiName": "interaction"
+                      },
+                      "outputAs": "created_interaction"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "s8",
+              "type": "update_entity",
+              "config": {
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "generating_voice"
+                  }
+                ],
+                "inputValue": "{{project.id}}",
+                "apiName": "project"
+              },
+              "outputAs": "updated_project"
+            }
+          ]
+        },
+        {
+          "id": "s9",
+          "type": "end",
+          "outputAs": "final_result",
+          "config": {},
+          "response": {
+            "debug_slides_result": "{{slides_result}}",
+            "project_id": "{{project.id}}",
+            "status": "{{updated_project.status}}"
+          }
+        }
+      ],
+      "outputShape": [
+        {
+          "ref": "updated_project.status",
+          "key": "status"
+        },
+        {
+          "ref": "slides_result",
+          "key": "debug_slides_result"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "ingest",
+    "api": {
+      "name": "ingest",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "contentsource_id",
+            "source": "query",
+            "required": true
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "source",
+          "config": {
+            "apiName": "contentsource",
+            "inputValue": "{{input._query.contentsource_id}}"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "update_entity",
+          "outputAs": "mark_processing",
+          "config": {
+            "apiName": "contentsource",
+            "inputValue": "{{source.id}}",
+            "fields": [
+              {
+                "field": "status",
+                "value": "processing"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s3",
+          "type": "condition",
+          "branches": [
+            {
+              "id": "b_url",
+              "conditions": [
+                {
+                  "field": "{{source.source_type}}",
+                  "operator": "==",
+                  "value": "url"
+                }
+              ],
+              "then": [
+                "s4"
+              ]
+            },
+            {
+              "id": "b_image",
+              "conditions": [
+                {
+                  "field": "{{source.source_type}}",
+                  "operator": "==",
+                  "value": "image"
+                }
+              ],
+              "then": [
+                "s5"
+              ]
+            },
+            {
+              "id": "b_pdf",
+              "conditions": [
+                {
+                  "field": "{{source.source_type}}",
+                  "operator": "==",
+                  "value": "pdf"
+                }
+              ],
+              "then": [
+                "s6"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s7"
+          ],
+          "steps": [
+            {
+              "id": "s4",
+              "type": "ai_call",
+              "outputAs": "url_result",
+              "config": {
+                "intent": "extract",
+                "outputFormat": "json",
+                "contextFields": [
+                  {
+                    "type": "url",
+                    "value": "{{source.url}}",
+                    "label": "Source URL"
+                  }
+                ],
+                "instructions": "Extract the main textual content of this page, discarding navigation/ads/boilerplate. Return raw_text (the cleaned full text) and summary (a 3-5 sentence summary).",
+                "outputFields": [
+                  {
+                    "name": "raw_text",
+                    "description": "Cleaned full text content of the page"
+                  },
+                  {
+                    "name": "summary",
+                    "description": "3-5 sentence summary"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s5",
+              "type": "ai_call",
+              "outputAs": "image_result",
+              "config": {
+                "intent": "generate",
+                "outputFormat": "json",
+                "contextFields": [
+                  {
+                    "type": "image",
+                    "value": "{{source.file_key}}",
+                    "label": "Source image"
+                  }
+                ],
+                "instructions": "Describe this image in detail \u2014 subject matter, visible text, layout, mood, and any facts/data it conveys \u2014 so the description can be used as source material for generating a video script. Return raw_text (the full description) and summary (a 1-2 sentence summary). Requires a vision-capable model; if the configured provider is Gemini, note that image context fields are silently skipped there per platform capabilities.",
+                "outputFields": [
+                  {
+                    "name": "raw_text",
+                    "description": "Detailed description of the image"
+                  },
+                  {
+                    "name": "summary",
+                    "description": "1-2 sentence summary"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s6",
+              "type": "update_entity",
+              "outputAs": "mark_pdf_failed",
+              "config": {
+                "apiName": "contentsource",
+                "inputValue": "{{source.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "failed"
+                  },
+                  {
+                    "field": "summary",
+                    "value": "PDF text extraction is not supported natively by this logic block \u2014 ai_call's file context type only accepts text/json/csv/xml, not binary PDF. Pre-extract this PDF to plain text (e.g. via an external.webhook to a PDF-to-text service) and re-submit as source_type=text, or add a dedicated extraction step here once that service exists."
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s7",
+              "type": "ai_call",
+              "outputAs": "text_result",
+              "config": {
+                "intent": "summarize",
+                "outputFormat": "json",
+                "contextFields": [
+                  {
+                    "type": "text",
+                    "value": "{{source.raw_text}}",
+                    "label": "Source text"
+                  }
+                ],
+                "instructions": "Write a 3-5 sentence summary of this text. Return summary only.",
+                "outputFields": [
+                  {
+                    "name": "summary",
+                    "description": "3-5 sentence summary"
+                  }
+                ]
+              }
+            }
+          ],
+          "outputAs": "s3_branch",
+          "config": {}
+        },
+        {
+          "id": "s8",
+          "type": "condition",
+          "branches": [
+            {
+              "id": "b_url2",
+              "conditions": [
+                {
+                  "field": "{{source.source_type}}",
+                  "operator": "==",
+                  "value": "url"
+                }
+              ],
+              "then": [
+                "s9"
+              ]
+            },
+            {
+              "id": "b_image2",
+              "conditions": [
+                {
+                  "field": "{{source.source_type}}",
+                  "operator": "==",
+                  "value": "image"
+                }
+              ],
+              "then": [
+                "s10"
+              ]
+            },
+            {
+              "id": "b_pdf2",
+              "conditions": [
+                {
+                  "field": "{{source.source_type}}",
+                  "operator": "==",
+                  "value": "pdf"
+                }
+              ],
+              "then": [
+                "s11"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s12"
+          ],
+          "steps": [
+            {
+              "id": "s9",
+              "type": "update_entity",
+              "outputAs": "saved_url",
+              "config": {
+                "apiName": "contentsource",
+                "inputValue": "{{source.id}}",
+                "fields": [
+                  {
+                    "field": "raw_text",
+                    "value": "{{url_result.raw_text}}"
+                  },
+                  {
+                    "field": "summary",
+                    "value": "{{url_result.summary}}"
+                  },
+                  {
+                    "field": "status",
+                    "value": "processed"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s10",
+              "type": "update_entity",
+              "outputAs": "saved_image",
+              "config": {
+                "apiName": "contentsource",
+                "inputValue": "{{source.id}}",
+                "fields": [
+                  {
+                    "field": "raw_text",
+                    "value": "{{image_result.raw_text}}"
+                  },
+                  {
+                    "field": "summary",
+                    "value": "{{image_result.summary}}"
+                  },
+                  {
+                    "field": "status",
+                    "value": "processed"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s11",
+              "type": "end",
+              "config": {},
+              "response": {
+                "status": "failed",
+                "reason": "pdf_not_supported"
+              },
+              "outputAs": "s11_result"
+            },
+            {
+              "id": "s12",
+              "type": "update_entity",
+              "outputAs": "saved_text",
+              "config": {
+                "apiName": "contentsource",
+                "inputValue": "{{source.id}}",
+                "fields": [
+                  {
+                    "field": "summary",
+                    "value": "{{text_result.summary}}"
+                  },
+                  {
+                    "field": "status",
+                    "value": "processed"
+                  }
+                ]
+              }
+            }
+          ],
+          "outputAs": "s8_branch",
+          "config": {}
+        },
+        {
+          "id": "s13",
+          "type": "end",
+          "config": {},
+          "response": {
+            "status": "processed",
+            "contentsource_id": "{{source.id}}"
+          },
+          "outputAs": "s13_result"
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "status",
+          "ref": "s13.status"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "generate_voiceover",
+    "api": {
+      "name": "generate_voiceover",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "project_id",
+            "source": "query",
+            "required": true
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "project",
+          "config": {
+            "apiName": "project",
+            "inputValue": "{{input._query.project_id}}"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "condition",
+          "branches": [
+            {
+              "id": "b1",
+              "conditions": [
+                {
+                  "field": "{{project.status}}",
+                  "operator": "==",
+                  "value": "generating_voice"
+                }
+              ],
+              "then": [
+                "s3",
+                "s4",
+                "s5"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s_skip"
+          ],
+          "steps": [
+            {
+              "id": "s_skip",
+              "type": "end",
+              "config": {},
+              "response": {
+                "status": "{{project.status}}",
+                "skipped": true
+              },
+              "outputAs": "s_skip_result"
+            },
+            {
+              "id": "s3",
+              "type": "list_entities",
+              "outputAs": "slides",
+              "config": {
+                "apiName": "generatedhtml",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ],
+                "sortBy": "sort_order",
+                "sortDir": "asc"
+              }
+            },
+            {
+              "id": "s4",
+              "type": "loop",
+              "outputAs": "slide_loop",
+              "config": {
+                "listRef": "slides.items",
+                "maxIterations": 12
+              },
+              "steps": [
+                {
+                  "id": "s4a",
+                  "type": "ai_call",
+                  "outputAs": "tts_result",
+                  "config": {
+                    "intent": "generate",
+                    "outputFormat": "audio",
+                    "contextFields": [
+                      {
+                        "type": "text",
+                        "value": "{{slide_loop.current_item.narration_text}}",
+                        "label": "Narration text"
+                      }
+                    ],
+                    "instructions": "Convert this narration text into natural-sounding spoken audio for a video voiceover. Requires the tenant to have an AI provider (gemini or openai) enabled with a TTS-capable model under Tenant Settings -> AI; pin the provider/model explicitly via taskModels if the org default model is not TTS-capable."
+                  }
+                },
+                {
+                  "id": "s4b",
+                  "type": "create_entity",
+                  "outputAs": "created_voiceover",
+                  "config": {
+                    "apiName": "voiceover",
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{project.id}}"
+                      },
+                      {
+                        "field": "slide_id",
+                        "value": "{{slide_loop.current_item.id}}"
+                      },
+                      {
+                        "field": "audio_file",
+                        "value": "{{tts_result.url}}"
+                      },
+                      {
+                        "field": "voice_style",
+                        "value": "nova"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s5",
+              "type": "update_entity",
+              "outputAs": "updated_project",
+              "config": {
+                "apiName": "project",
+                "inputValue": "{{project.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "generating_direction"
+                  }
+                ]
+              }
+            }
+          ],
+          "outputAs": "s2_branch",
+          "config": {}
+        },
+        {
+          "id": "s6",
+          "type": "end",
+          "config": {},
+          "response": {
+            "status": "{{updated_project.status}}"
+          },
+          "outputAs": "s6_result"
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "status",
+          "ref": "updated_project.status"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "generate_cinematic_direction",
+    "api": {
+      "name": "generate_cinematic_direction",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "project_id",
+            "source": "query",
+            "required": true
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "project",
+          "config": {
+            "apiName": "project",
+            "inputValue": "{{input._query.project_id}}"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "condition",
+          "branches": [
+            {
+              "id": "b1",
+              "conditions": [
+                {
+                  "field": "{{project.status}}",
+                  "operator": "==",
+                  "value": "generating_direction"
+                }
+              ],
+              "then": [
+                "s3",
+                "s4",
+                "s5",
+                "s6",
+                "s7",
+                "s8",
+                "s9",
+                "s10",
+                "s11"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s_skip"
+          ],
+          "steps": [
+            {
+              "id": "s_skip",
+              "type": "end",
+              "config": {},
+              "response": {
+                "status": "{{project.status}}",
+                "skipped": true
+              },
+              "outputAs": "s_skip_result"
+            },
+            {
+              "id": "s3",
+              "type": "list_entities",
+              "outputAs": "slides",
+              "config": {
+                "apiName": "generatedhtml",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ],
+                "sortBy": "sort_order",
+                "sortDir": "asc"
+              }
+            },
+            {
+              "id": "s4",
+              "type": "list_entities",
+              "outputAs": "interactions",
+              "config": {
+                "apiName": "interaction",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  },
+                  {
+                    "field": "trigger",
+                    "op": "eq",
+                    "value": "timed"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s5",
+              "type": "create_variable",
+              "outputAs": "timeline_summary",
+              "config": {
+                "varType": "string",
+                "initialValue": ""
+              }
+            },
+            {
+              "id": "s6",
+              "type": "loop",
+              "outputAs": "slide_summary_loop",
+              "config": {
+                "listRef": "slides.items",
+                "maxIterations": 12
+              },
+              "steps": [
+                {
+                  "id": "s6a",
+                  "type": "set_variable",
+                  "outputAs": "append_slide",
+                  "config": {
+                    "target": "timeline_summary",
+                    "operation": "add",
+                    "value": "\nSlide id={{slide_summary_loop.current_item.id}} sort_order={{slide_summary_loop.current_item.sort_order}} duration={{slide_summary_loop.current_item.duration}}s"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s7",
+              "type": "loop",
+              "outputAs": "interaction_summary_loop",
+              "config": {
+                "listRef": "interactions.items",
+                "maxIterations": 30
+              },
+              "steps": [
+                {
+                  "id": "s7a",
+                  "type": "set_variable",
+                  "outputAs": "append_interaction",
+                  "config": {
+                    "target": "timeline_summary",
+                    "operation": "add",
+                    "value": "\nInteraction id={{interaction_summary_loop.current_item.id}} slide_id={{interaction_summary_loop.current_item.slide_id}} target_text=\"{{interaction_summary_loop.current_item.target_text}}\" action={{interaction_summary_loop.current_item.action}} time_offset={{interaction_summary_loop.current_item.time_offset}}s duration={{interaction_summary_loop.current_item.duration}}s"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s8",
+              "type": "ai_call",
+              "outputAs": "direction_result",
+              "config": {
+                "intent": "generate",
+                "outputFormat": "json",
+                "contextFields": [
+                  {
+                    "type": "text",
+                    "value": "{{timeline_summary}}",
+                    "label": "Slide and interaction timeline"
+                  },
+                  {
+                    "type": "text",
+                    "value": "camera_intensity={{project.director_camera_intensity}} auto_generate_effects={{project.director_auto_generate_effects}} camera_move_duration_sec={{project.director_camera_move_duration_sec}} zoom_hold_after_effect_sec={{project.director_zoom_hold_after_effect_sec}}",
+                    "label": "Director settings"
+                  }
+                ],
+                "instructions": "You are a cinematography director. Given a slide timeline (with global-timeline-relative durations, computed by summing each prior slide's duration) and a list of timed interaction cues (each with a slide_id, target_text, action, time_offset relative to its OWN slide start, and duration), produce camera shots and effect cues.\n\nRules:\n- Compute each slide's global start/end time by summing durations of all prior slides in sort_order.\n- A slide with NO interactions gets exactly one camera shot: shot_type='establishing', x_percent=50, y_percent=50, zoom=1.0, spanning the slide's full global start-to-end time.\n- A slide WITH interactions gets: one 'focus' shot per interaction (zoom = 1.12 for camera_intensity=subtle, 1.18 for medium, 1.25 for dramatic; x_percent/y_percent = a reasonable estimated on-screen position for that target_text within the slide, expressed as 0-100 percent of frame width/height), starting camera_move_duration_sec BEFORE the interaction's global start time and ending zoom_hold_after_effect_sec AFTER the interaction's global end time (clamped to the slide's own boundaries) \u2014 plus a 'final-hold' shot returning to x_percent=50, y_percent=50, zoom=1.0 for any remaining time in the slide after the last focus shot.\n- If auto_generate_effects is true, also produce one VideoEffectCue per interaction whose action is one of: highlight, glow-green, glow-orange, spotlight, scale-pop, draw-outline, sweep-highlight, dim-rest \u2014 map action to effect: highlight/spotlight->spotlight, glow-green/glow-orange->glow, scale-pop->scale-pop, draw-outline->circle, sweep-highlight->wipe-reveal, dim-rest->dim-background. Cue start_time/duration should match the interaction's global start_time/duration.\n- camera shots for the SAME slide must not overlap in time and must be contiguous (each shot's end_time equals the next shot's start_time).\n\nReturn ONLY valid JSON: { \"cameraShots\": [{ slide_id, label, start_time, end_time, x_percent, y_percent, zoom, shot_type }], \"videoEffectCues\": [{ slide_id, interaction_id, label, start_time, duration, effect }] }. No prose, no markdown fences.",
+                "outputFields": [
+                  {
+                    "name": "cameraShots",
+                    "description": "Array of camera shot objects"
+                  },
+                  {
+                    "name": "videoEffectCues",
+                    "description": "Array of video effect cue objects"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s9",
+              "type": "loop",
+              "outputAs": "shot_loop",
+              "config": {
+                "listRef": "direction_result.cameraShots",
+                "maxIterations": 60
+              },
+              "steps": [
+                {
+                  "id": "s9a",
+                  "type": "create_entity",
+                  "outputAs": "created_shot",
+                  "config": {
+                    "apiName": "camerashot",
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{project.id}}"
+                      },
+                      {
+                        "field": "slide_id",
+                        "value": "{{shot_loop.current_item.slide_id}}"
+                      },
+                      {
+                        "field": "label",
+                        "value": "{{shot_loop.current_item.label}}"
+                      },
+                      {
+                        "field": "start_time",
+                        "value": "{{shot_loop.current_item.start_time}}"
+                      },
+                      {
+                        "field": "end_time",
+                        "value": "{{shot_loop.current_item.end_time}}"
+                      },
+                      {
+                        "field": "x_percent",
+                        "value": "{{shot_loop.current_item.x_percent}}"
+                      },
+                      {
+                        "field": "y_percent",
+                        "value": "{{shot_loop.current_item.y_percent}}"
+                      },
+                      {
+                        "field": "zoom",
+                        "value": "{{shot_loop.current_item.zoom}}"
+                      },
+                      {
+                        "field": "easing",
+                        "value": "cinematic"
+                      },
+                      {
+                        "field": "shot_type",
+                        "value": "{{shot_loop.current_item.shot_type}}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s10",
+              "type": "loop",
+              "outputAs": "cue_loop",
+              "config": {
+                "listRef": "direction_result.videoEffectCues",
+                "maxIterations": 30
+              },
+              "steps": [
+                {
+                  "id": "s10a",
+                  "type": "create_entity",
+                  "outputAs": "created_cue",
+                  "config": {
+                    "apiName": "videoeffectcue",
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{project.id}}"
+                      },
+                      {
+                        "field": "slide_id",
+                        "value": "{{cue_loop.current_item.slide_id}}"
+                      },
+                      {
+                        "field": "interaction_id",
+                        "value": "{{cue_loop.current_item.interaction_id}}"
+                      },
+                      {
+                        "field": "label",
+                        "value": "{{cue_loop.current_item.label}}"
+                      },
+                      {
+                        "field": "start_time",
+                        "value": "{{cue_loop.current_item.start_time}}"
+                      },
+                      {
+                        "field": "duration",
+                        "value": "{{cue_loop.current_item.duration}}"
+                      },
+                      {
+                        "field": "effect",
+                        "value": "{{cue_loop.current_item.effect}}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s11",
+              "type": "update_entity",
+              "outputAs": "updated_project",
+              "config": {
+                "apiName": "project",
+                "inputValue": "{{project.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "ready_to_render"
+                  }
+                ]
+              }
+            }
+          ],
+          "outputAs": "s2_branch",
+          "config": {}
+        },
+        {
+          "id": "s12",
+          "type": "end",
+          "config": {},
+          "response": {
+            "status": "{{updated_project.status}}"
+          },
+          "outputAs": "s12_result"
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "status",
+          "ref": "updated_project.status"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "start_render",
+    "api": {
+      "name": "start_render",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "project_id",
+            "source": "query",
+            "required": true
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "project",
+          "config": {
+            "apiName": "project",
+            "inputValue": "{{input._query.project_id}}"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "condition",
+          "branches": [
+            {
+              "id": "b1",
+              "conditions": [
+                {
+                  "field": "{{project.status}}",
+                  "operator": "==",
+                  "value": "rendering"
+                }
+              ],
+              "then": [
+                "s3",
+                "s4",
+                "s5",
+                "s6",
+                "s7",
+                "s8",
+                "s9",
+                "s11",
+                "s12"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s_skip"
+          ],
+          "steps": [
+            {
+              "id": "s_skip",
+              "type": "end",
+              "config": {},
+              "response": {
+                "status": "{{project.status}}",
+                "skipped": true,
+                "reason": "project not in a renderable state"
+              },
+              "outputAs": "s_skip_result"
+            },
+            {
+              "id": "s3",
+              "type": "list_entities",
+              "outputAs": "slides",
+              "config": {
+                "apiName": "generatedhtml",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ],
+                "sortBy": "sort_order",
+                "sortDir": "asc"
+              }
+            },
+            {
+              "id": "s4",
+              "type": "list_entities",
+              "outputAs": "interactions",
+              "config": {
+                "apiName": "interaction",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s5",
+              "type": "list_entities",
+              "outputAs": "camera_shots",
+              "config": {
+                "apiName": "camerashot",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ],
+                "sortBy": "start_time",
+                "sortDir": "asc"
+              }
+            },
+            {
+              "id": "s6",
+              "type": "list_entities",
+              "outputAs": "effect_cues",
+              "config": {
+                "apiName": "videoeffectcue",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s7",
+              "type": "list_entities",
+              "outputAs": "cursor_points",
+              "config": {
+                "apiName": "cursortimelinepoint",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ],
+                "sortBy": "time",
+                "sortDir": "asc"
+              }
+            },
+            {
+              "id": "s8",
+              "type": "list_entities",
+              "outputAs": "voiceovers",
+              "config": {
+                "apiName": "voiceover",
+                "attrFilters": [
+                  {
+                    "field": "project_id",
+                    "op": "eq",
+                    "value": "{{project.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s9",
+              "type": "create_entity",
+              "outputAs": "export_asset",
+              "config": {
+                "apiName": "exportasset",
+                "fields": [
+                  {
+                    "field": "project_id",
+                    "value": "{{project.id}}"
+                  },
+                  {
+                    "field": "asset_type",
+                    "value": "config-json"
+                  },
+                  {
+                    "field": "status",
+                    "value": "processing"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s11",
+              "type": "webhook",
+              "outputAs": "render_worker_response",
+              "config": {
+                "url": "{{RENDER_WORKER_URL}}",
+                "method": "POST",
+                "body": {
+                  "project_id": "{{project.id}}",
+                  "export_asset_id": "{{export_asset.id}}",
+                  "canvas_aspect_ratio": "{{project.canvas_aspect_ratio}}",
+                  "custom_canvas_width": "{{project.custom_canvas_width}}",
+                  "custom_canvas_height": "{{project.custom_canvas_height}}",
+                  "slides": "{{slides.items}}",
+                  "interactions": "{{interactions.items}}",
+                  "camera_shots": "{{camera_shots.items}}",
+                  "effect_cues": "{{effect_cues.items}}",
+                  "cursor_points": "{{cursor_points.items}}",
+                  "voiceovers": "{{voiceovers.items}}",
+                  "callback_url": "{{CALLBACK_BASE_URL}}/render_complete?export_asset_id={{export_asset.id}}"
+                }
+              }
+            },
+            {
+              "id": "s12",
+              "type": "end",
+              "config": {},
+              "response": {
+                "status": "rendering",
+                "export_asset_id": "{{export_asset.id}}"
+              },
+              "outputAs": "s12_result"
+            }
+          ],
+          "outputAs": "s2_branch",
+          "config": {}
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "status",
+          "ref": "s12.status"
+        },
+        {
+          "key": "export_asset_id",
+          "ref": "export_asset.id"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "render_complete",
+    "api": {
+      "name": "render_complete",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "export_asset_id",
+            "source": "query",
+            "required": true
+          },
+          {
+            "name": "status",
+            "source": "body",
+            "required": true
+          },
+          {
+            "name": "cdn_url",
+            "source": "body",
+            "required": false
+          },
+          {
+            "name": "file_key",
+            "source": "body",
+            "required": false
+          },
+          {
+            "name": "error_message",
+            "source": "body",
+            "required": false
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "export_asset",
+          "config": {
+            "apiName": "exportasset",
+            "inputValue": "{{input._query.export_asset_id}}"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "get_entity",
+          "outputAs": "project",
+          "config": {
+            "apiName": "project",
+            "inputValue": "{{export_asset.project_id}}"
+          }
+        },
+        {
+          "id": "s3",
+          "type": "condition",
+          "branches": [
+            {
+              "id": "b_ready",
+              "conditions": [
+                {
+                  "field": "{{input.status}}",
+                  "operator": "==",
+                  "value": "ready"
+                }
+              ],
+              "then": [
+                "s4",
+                "s5",
+                "s5b"
+              ]
+            }
+          ],
+          "defaultThen": [
+            "s6",
+            "s7"
+          ],
+          "steps": [
+            {
+              "id": "s6",
+              "type": "update_entity",
+              "outputAs": "mark_config_failed",
+              "config": {
+                "apiName": "exportasset",
+                "inputValue": "{{export_asset.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "failed"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4",
+              "type": "create_entity",
+              "outputAs": "video_asset",
+              "config": {
+                "apiName": "exportasset",
+                "fields": [
+                  {
+                    "field": "project_id",
+                    "value": "{{project.id}}"
+                  },
+                  {
+                    "field": "asset_type",
+                    "value": "video"
+                  },
+                  {
+                    "field": "cdn_url",
+                    "value": "{{input.cdn_url}}"
+                  },
+                  {
+                    "field": "file_key",
+                    "value": "{{input.file_key}}"
+                  },
+                  {
+                    "field": "status",
+                    "value": "ready"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s5",
+              "type": "update_entity",
+              "outputAs": "updated_project_ready",
+              "config": {
+                "apiName": "project",
+                "inputValue": "{{project.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "ready"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s5b",
+              "type": "update_entity",
+              "outputAs": "mark_config_ready",
+              "config": {
+                "apiName": "exportasset",
+                "inputValue": "{{export_asset.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "ready"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s7",
+              "type": "update_entity",
+              "outputAs": "updated_project_failed",
+              "config": {
+                "apiName": "project",
+                "inputValue": "{{project.id}}",
+                "fields": [
+                  {
+                    "field": "status",
+                    "value": "failed"
+                  }
+                ]
+              }
+            }
+          ],
+          "outputAs": "s3_branch",
+          "config": {}
+        },
+        {
+          "id": "s8",
+          "type": "end",
+          "config": {},
+          "response": {
+            "status": "{{input.status}}",
+            "project_id": "{{project.id}}"
+          },
+          "outputAs": "s8_result"
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "status",
+          "ref": "s8.status"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "duplicate_project",
+    "api": {
+      "name": "duplicate_project",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "project_id",
+            "source": "query",
+            "required": true
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "get_entity",
+          "outputAs": "source_project",
+          "config": {
+            "apiName": "project",
+            "inputValue": "{{input._query.project_id}}"
+          }
+        },
+        {
+          "id": "s2",
+          "type": "create_entity",
+          "outputAs": "new_project",
+          "config": {
+            "apiName": "project",
+            "fields": [
+              {
+                "field": "name",
+                "value": "{{source_project.name}} (Copy)"
+              },
+              {
+                "field": "video_type",
+                "value": "{{source_project.video_type}}"
+              },
+              {
+                "field": "status",
+                "value": "ready_to_render"
+              },
+              {
+                "field": "canvas_aspect_ratio",
+                "value": "{{source_project.canvas_aspect_ratio}}"
+              },
+              {
+                "field": "custom_canvas_width",
+                "value": "{{source_project.custom_canvas_width}}"
+              },
+              {
+                "field": "custom_canvas_height",
+                "value": "{{source_project.custom_canvas_height}}"
+              },
+              {
+                "field": "director_camera_intensity",
+                "value": "{{source_project.director_camera_intensity}}"
+              },
+              {
+                "field": "director_auto_generate_effects",
+                "value": "{{source_project.director_auto_generate_effects}}"
+              },
+              {
+                "field": "director_zoom_hold_after_effect_sec",
+                "value": "{{source_project.director_zoom_hold_after_effect_sec}}"
+              },
+              {
+                "field": "director_camera_move_duration_sec",
+                "value": "{{source_project.director_camera_move_duration_sec}}"
+              },
+              {
+                "field": "cursor_speed",
+                "value": "{{source_project.cursor_speed}}"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s3",
+          "type": "list_entities",
+          "outputAs": "old_slides",
+          "config": {
+            "apiName": "generatedhtml",
+            "attrFilters": [
+              {
+                "field": "project_id",
+                "op": "eq",
+                "value": "{{source_project.id}}"
+              }
+            ],
+            "sortBy": "sort_order",
+            "sortDir": "asc"
+          }
+        },
+        {
+          "id": "s4",
+          "type": "loop",
+          "outputAs": "slide_loop",
+          "config": {
+            "listRef": "old_slides.items",
+            "maxIterations": 12
+          },
+          "steps": [
+            {
+              "id": "s4a",
+              "type": "create_entity",
+              "outputAs": "new_slide",
+              "config": {
+                "apiName": "generatedhtml",
+                "fields": [
+                  {
+                    "field": "project_id",
+                    "value": "{{new_project.id}}"
+                  },
+                  {
+                    "field": "html_content",
+                    "value": "{{slide_loop.current_item.html_content}}"
+                  },
+                  {
+                    "field": "narration_text",
+                    "value": "{{slide_loop.current_item.narration_text}}"
+                  },
+                  {
+                    "field": "sort_order",
+                    "value": "{{slide_loop.current_item.sort_order}}"
+                  },
+                  {
+                    "field": "duration",
+                    "value": "{{slide_loop.current_item.duration}}"
+                  },
+                  {
+                    "field": "transition",
+                    "value": "{{slide_loop.current_item.transition}}"
+                  },
+                  {
+                    "field": "transition_duration",
+                    "value": "{{slide_loop.current_item.transition_duration}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4b",
+              "type": "list_entities",
+              "outputAs": "old_interactions",
+              "config": {
+                "apiName": "interaction",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4c",
+              "type": "loop",
+              "outputAs": "interaction_loop",
+              "config": {
+                "listRef": "old_interactions.items",
+                "maxIterations": 3
+              },
+              "steps": [
+                {
+                  "id": "s4c1",
+                  "type": "create_entity",
+                  "outputAs": "new_interaction",
+                  "config": {
+                    "apiName": "interaction",
+                    "fields": [
+                      {
+                        "field": "slide_id",
+                        "value": "{{new_slide.id}}"
+                      },
+                      {
+                        "field": "project_id",
+                        "value": "{{new_project.id}}"
+                      },
+                      {
+                        "field": "target_text",
+                        "value": "{{interaction_loop.current_item.target_text}}"
+                      },
+                      {
+                        "field": "action",
+                        "value": "{{interaction_loop.current_item.action}}"
+                      },
+                      {
+                        "field": "trigger",
+                        "value": "{{interaction_loop.current_item.trigger}}"
+                      },
+                      {
+                        "field": "time_offset",
+                        "value": "{{interaction_loop.current_item.time_offset}}"
+                      },
+                      {
+                        "field": "duration",
+                        "value": "{{interaction_loop.current_item.duration}}"
+                      },
+                      {
+                        "field": "label",
+                        "value": "{{interaction_loop.current_item.label}}"
+                      },
+                      {
+                        "field": "sort_order",
+                        "value": "{{interaction_loop.current_item.sort_order}}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s4d",
+              "type": "list_entities",
+              "outputAs": "old_shots",
+              "config": {
+                "apiName": "camerashot",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4e",
+              "type": "loop",
+              "outputAs": "shot_loop",
+              "config": {
+                "listRef": "old_shots.items",
+                "maxIterations": 10
+              },
+              "steps": [
+                {
+                  "id": "s4e1",
+                  "type": "create_entity",
+                  "outputAs": "new_shot",
+                  "config": {
+                    "apiName": "camerashot",
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{new_project.id}}"
+                      },
+                      {
+                        "field": "slide_id",
+                        "value": "{{new_slide.id}}"
+                      },
+                      {
+                        "field": "label",
+                        "value": "{{shot_loop.current_item.label}}"
+                      },
+                      {
+                        "field": "start_time",
+                        "value": "{{shot_loop.current_item.start_time}}"
+                      },
+                      {
+                        "field": "end_time",
+                        "value": "{{shot_loop.current_item.end_time}}"
+                      },
+                      {
+                        "field": "target_selector",
+                        "value": "{{shot_loop.current_item.target_selector}}"
+                      },
+                      {
+                        "field": "x_percent",
+                        "value": "{{shot_loop.current_item.x_percent}}"
+                      },
+                      {
+                        "field": "y_percent",
+                        "value": "{{shot_loop.current_item.y_percent}}"
+                      },
+                      {
+                        "field": "zoom",
+                        "value": "{{shot_loop.current_item.zoom}}"
+                      },
+                      {
+                        "field": "transition_duration",
+                        "value": "{{shot_loop.current_item.transition_duration}}"
+                      },
+                      {
+                        "field": "easing",
+                        "value": "{{shot_loop.current_item.easing}}"
+                      },
+                      {
+                        "field": "shot_type",
+                        "value": "{{shot_loop.current_item.shot_type}}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s4f",
+              "type": "list_entities",
+              "outputAs": "old_cues",
+              "config": {
+                "apiName": "videoeffectcue",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4g",
+              "type": "loop",
+              "outputAs": "cue_loop",
+              "config": {
+                "listRef": "old_cues.items",
+                "maxIterations": 10
+              },
+              "steps": [
+                {
+                  "id": "s4g1",
+                  "type": "create_entity",
+                  "outputAs": "new_cue",
+                  "config": {
+                    "apiName": "videoeffectcue",
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{new_project.id}}"
+                      },
+                      {
+                        "field": "slide_id",
+                        "value": "{{new_slide.id}}"
+                      },
+                      {
+                        "field": "label",
+                        "value": "{{cue_loop.current_item.label}}"
+                      },
+                      {
+                        "field": "start_time",
+                        "value": "{{cue_loop.current_item.start_time}}"
+                      },
+                      {
+                        "field": "duration",
+                        "value": "{{cue_loop.current_item.duration}}"
+                      },
+                      {
+                        "field": "target_selector",
+                        "value": "{{cue_loop.current_item.target_selector}}"
+                      },
+                      {
+                        "field": "effect",
+                        "value": "{{cue_loop.current_item.effect}}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s4h",
+              "type": "list_entities",
+              "outputAs": "old_points",
+              "config": {
+                "apiName": "cursortimelinepoint",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s4i",
+              "type": "loop",
+              "outputAs": "point_loop",
+              "config": {
+                "listRef": "old_points.items",
+                "maxIterations": 20
+              },
+              "steps": [
+                {
+                  "id": "s4i1",
+                  "type": "create_entity",
+                  "outputAs": "new_point",
+                  "config": {
+                    "apiName": "cursortimelinepoint",
+                    "fields": [
+                      {
+                        "field": "project_id",
+                        "value": "{{new_project.id}}"
+                      },
+                      {
+                        "field": "slide_id",
+                        "value": "{{new_slide.id}}"
+                      },
+                      {
+                        "field": "time",
+                        "value": "{{point_loop.current_item.time}}"
+                      },
+                      {
+                        "field": "x_percent",
+                        "value": "{{point_loop.current_item.x_percent}}"
+                      },
+                      {
+                        "field": "y_percent",
+                        "value": "{{point_loop.current_item.y_percent}}"
+                      },
+                      {
+                        "field": "duration_ms",
+                        "value": "{{point_loop.current_item.duration_ms}}"
+                      },
+                      {
+                        "field": "click",
+                        "value": "{{point_loop.current_item.click}}"
+                      },
+                      {
+                        "field": "label",
+                        "value": "{{point_loop.current_item.label}}"
+                      },
+                      {
+                        "field": "source",
+                        "value": "{{point_loop.current_item.source}}"
+                      },
+                      {
+                        "field": "selector",
+                        "value": "{{point_loop.current_item.selector}}"
+                      },
+                      {
+                        "field": "point_role",
+                        "value": "{{point_loop.current_item.point_role}}"
+                      },
+                      {
+                        "field": "sequence_index",
+                        "value": "{{point_loop.current_item.sequence_index}}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "s5",
+          "type": "list_entities",
+          "outputAs": "project_level_points",
+          "config": {
+            "apiName": "cursortimelinepoint",
+            "attrFilters": [
+              {
+                "field": "project_id",
+                "op": "eq",
+                "value": "{{source_project.id}}"
+              },
+              {
+                "field": "slide_id",
+                "op": "not_exists"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s6",
+          "type": "loop",
+          "outputAs": "plp_loop",
+          "config": {
+            "listRef": "project_level_points.items",
+            "maxIterations": 20
+          },
+          "steps": [
+            {
+              "id": "s6a",
+              "type": "create_entity",
+              "outputAs": "new_plp",
+              "config": {
+                "apiName": "cursortimelinepoint",
+                "fields": [
+                  {
+                    "field": "project_id",
+                    "value": "{{new_project.id}}"
+                  },
+                  {
+                    "field": "time",
+                    "value": "{{plp_loop.current_item.time}}"
+                  },
+                  {
+                    "field": "x_percent",
+                    "value": "{{plp_loop.current_item.x_percent}}"
+                  },
+                  {
+                    "field": "y_percent",
+                    "value": "{{plp_loop.current_item.y_percent}}"
+                  },
+                  {
+                    "field": "duration_ms",
+                    "value": "{{plp_loop.current_item.duration_ms}}"
+                  },
+                  {
+                    "field": "source",
+                    "value": "{{plp_loop.current_item.source}}"
+                  },
+                  {
+                    "field": "point_role",
+                    "value": "{{plp_loop.current_item.point_role}}"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": "s7",
+          "type": "end",
+          "config": {},
+          "response": {
+            "status": "duplicated",
+            "new_project_id": "{{new_project.id}}"
+          },
+          "outputAs": "s7_result"
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "new_project_id",
+          "ref": "new_project.id"
+        }
+      ]
+    }
+  },
+  {
+    "apiname": "delete_project_cascade",
+    "api": {
+      "name": "delete_project_cascade",
+      "method": "POST",
+      "type": "custom",
+      "enabled": true,
+      "onError": "halt",
+      "inputSchema": {
+        "fields": [
+          {
+            "name": "project_id",
+            "source": "query",
+            "required": true
+          }
+        ]
+      },
+      "steps": [
+        {
+          "id": "s1",
+          "type": "list_entities",
+          "outputAs": "slides",
+          "config": {
+            "apiName": "generatedhtml",
+            "attrFilters": [
+              {
+                "field": "project_id",
+                "op": "eq",
+                "value": "{{input._query.project_id}}"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s2",
+          "type": "loop",
+          "outputAs": "slide_loop",
+          "config": {
+            "listRef": "slides.items",
+            "maxIterations": 12
+          },
+          "steps": [
+            {
+              "id": "s2a",
+              "type": "list_entities",
+              "outputAs": "interactions_to_delete",
+              "config": {
+                "apiName": "interaction",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s2b",
+              "type": "loop",
+              "outputAs": "int_del_loop",
+              "config": {
+                "listRef": "interactions_to_delete.items",
+                "maxIterations": 20
+              },
+              "steps": [
+                {
+                  "id": "s2b1",
+                  "type": "delete_entity",
+                  "outputAs": "deleted_interaction",
+                  "config": {
+                    "apiName": "interaction",
+                    "inputValue": "{{int_del_loop.current_item.id}}"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s2c",
+              "type": "list_entities",
+              "outputAs": "shots_to_delete",
+              "config": {
+                "apiName": "camerashot",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s2d",
+              "type": "loop",
+              "outputAs": "shot_del_loop",
+              "config": {
+                "listRef": "shots_to_delete.items",
+                "maxIterations": 20
+              },
+              "steps": [
+                {
+                  "id": "s2d1",
+                  "type": "delete_entity",
+                  "outputAs": "deleted_shot",
+                  "config": {
+                    "apiName": "camerashot",
+                    "inputValue": "{{shot_del_loop.current_item.id}}"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s2e",
+              "type": "list_entities",
+              "outputAs": "cues_to_delete",
+              "config": {
+                "apiName": "videoeffectcue",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s2f",
+              "type": "loop",
+              "outputAs": "cue_del_loop",
+              "config": {
+                "listRef": "cues_to_delete.items",
+                "maxIterations": 20
+              },
+              "steps": [
+                {
+                  "id": "s2f1",
+                  "type": "delete_entity",
+                  "outputAs": "deleted_cue",
+                  "config": {
+                    "apiName": "videoeffectcue",
+                    "inputValue": "{{cue_del_loop.current_item.id}}"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s2g",
+              "type": "list_entities",
+              "outputAs": "points_to_delete",
+              "config": {
+                "apiName": "cursortimelinepoint",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s2h",
+              "type": "loop",
+              "outputAs": "point_del_loop",
+              "config": {
+                "listRef": "points_to_delete.items",
+                "maxIterations": 30
+              },
+              "steps": [
+                {
+                  "id": "s2h1",
+                  "type": "delete_entity",
+                  "outputAs": "deleted_point",
+                  "config": {
+                    "apiName": "cursortimelinepoint",
+                    "inputValue": "{{point_del_loop.current_item.id}}"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s2i",
+              "type": "list_entities",
+              "outputAs": "voiceovers_to_delete",
+              "config": {
+                "apiName": "voiceover",
+                "attrFilters": [
+                  {
+                    "field": "slide_id",
+                    "op": "eq",
+                    "value": "{{slide_loop.current_item.id}}"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "s2j",
+              "type": "loop",
+              "outputAs": "vo_del_loop",
+              "config": {
+                "listRef": "voiceovers_to_delete.items",
+                "maxIterations": 5
+              },
+              "steps": [
+                {
+                  "id": "s2j1",
+                  "type": "delete_entity",
+                  "outputAs": "deleted_voiceover",
+                  "config": {
+                    "apiName": "voiceover",
+                    "inputValue": "{{vo_del_loop.current_item.id}}"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "s2k",
+              "type": "delete_entity",
+              "outputAs": "deleted_slide",
+              "config": {
+                "apiName": "generatedhtml",
+                "inputValue": "{{slide_loop.current_item.id}}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "s3",
+          "type": "list_entities",
+          "outputAs": "project_level_points",
+          "config": {
+            "apiName": "cursortimelinepoint",
+            "attrFilters": [
+              {
+                "field": "project_id",
+                "op": "eq",
+                "value": "{{input._query.project_id}}"
+              },
+              {
+                "field": "slide_id",
+                "op": "not_exists"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s4",
+          "type": "loop",
+          "outputAs": "plp_del_loop",
+          "config": {
+            "listRef": "project_level_points.items",
+            "maxIterations": 20
+          },
+          "steps": [
+            {
+              "id": "s4a",
+              "type": "delete_entity",
+              "outputAs": "deleted_plp",
+              "config": {
+                "apiName": "cursortimelinepoint",
+                "inputValue": "{{plp_del_loop.current_item.id}}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "s5",
+          "type": "list_entities",
+          "outputAs": "sources_to_delete",
+          "config": {
+            "apiName": "contentsource",
+            "attrFilters": [
+              {
+                "field": "project_id",
+                "op": "eq",
+                "value": "{{input._query.project_id}}"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s6",
+          "type": "loop",
+          "outputAs": "source_del_loop",
+          "config": {
+            "listRef": "sources_to_delete.items",
+            "maxIterations": 20
+          },
+          "steps": [
+            {
+              "id": "s6a",
+              "type": "delete_entity",
+              "outputAs": "deleted_source",
+              "config": {
+                "apiName": "contentsource",
+                "inputValue": "{{source_del_loop.current_item.id}}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "s7",
+          "type": "list_entities",
+          "outputAs": "assets_to_delete",
+          "config": {
+            "apiName": "exportasset",
+            "attrFilters": [
+              {
+                "field": "project_id",
+                "op": "eq",
+                "value": "{{input._query.project_id}}"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s8",
+          "type": "loop",
+          "outputAs": "asset_del_loop",
+          "config": {
+            "listRef": "assets_to_delete.items",
+            "maxIterations": 20
+          },
+          "steps": [
+            {
+              "id": "s8a",
+              "type": "delete_entity",
+              "outputAs": "deleted_asset",
+              "config": {
+                "apiName": "exportasset",
+                "inputValue": "{{asset_del_loop.current_item.id}}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "s9",
+          "type": "delete_entity",
+          "outputAs": "deleted_project",
+          "config": {
+            "apiName": "project",
+            "inputValue": "{{input._query.project_id}}"
+          }
+        },
+        {
+          "id": "s10",
+          "type": "end",
+          "config": {},
+          "response": {
+            "status": "deleted",
+            "project_id": "{{input._query.project_id}}"
+          },
+          "outputAs": "s10_result"
+        }
+      ],
+      "outputShape": [
+        {
+          "key": "status",
+          "ref": "s10.status"
+        }
+      ]
+    }
+  }
+]

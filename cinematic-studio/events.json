@@ -1,0 +1,93 @@
+[
+  {
+    "_supersedes": "The old 'project webhook' + workerDispatchTable entry that used to be here. That design assumed logicblock invocation from an event wasn't possible in the console and worked around it with a single catch-all external.webhook firing on every Project update, with a worker-side dispatch table reading payload.status. CONFIRMED WRONG as of this pipeline: event_type 'custom_api' (block invocation) is real and works live — created via mcp__nostackai__create_event with destination_config.target_entity = the logicblock's apiname and field_mapping translating the triggering record into the block's declared inputSchema (per get_platform_capabilities' fieldMappingGuide: '_query.<field>' for a query-sourced input, value 'source.<field>' copied from the triggering record). This resolves ISSUES.md issue #9's remaining open question — block invocation from an event is real, not just theoretical, and the 5 events below are proof, created cleanly with zero errors on the live org."
+  },
+  {
+    "name": "ingest_source_on_create",
+    "id": "4f3ef1f8-f2d2-4462-8d8c-43b606114d43",
+    "event_type": "custom_api",
+    "entity_name": "contentsource",
+    "event_optype": "create",
+    "event_stage": "after",
+    "entry_conditions": [],
+    "destination_config": {
+      "target_entity": "ingest",
+      "field_mapping": { "_query.contentsource_id": "source.id" }
+    },
+    "rationale": "Fires on every new ContentSource row regardless of source_type — ingest's own condition step branches on source_type internally, so no entry_conditions needed here.",
+    "_correction": "Two bugs found live 2026-08-18, both silently broke every invocation since this event was created — every ContentSource sat stuck at status='draft' forever, never even reaching 'processing'. (1) target_entity was 'ingest_source', which was never the block's actual apiname — when pasted into the console it saved as 'ingest' (confirmed via list_logicblocks; a second block 'ingestpdf' also exists now, a manual duplicate for testing an unconfigured PDF ai_call step — the event was pointed at 'ingest', the fully-working original, not the duplicate). (2) field_mapping used '_query.content_source_id' but the block's declared input field (per its inputSchema and its own s1 step reading {{input._query.contentsource_id}}) is 'contentsource_id', no underscore between 'content' and 'source'. Fixing the event does NOT retroactively reprocess ContentSource rows created before the fix — they need to be recreated or the ingest block re-invoked manually for their ids via the console's API test tool.",
+    "_recreated": "This event was entirely deleted on 2026-09-02 — the user clicked what they believed was a 'Disable' button in the console and it deleted the event outright instead (see ISSUES.md's newest issue). Recreated identically via create_event, new id above. Same non-retroactive caveat applies again for anything created in the gap."
+  },
+  {
+    "name": "trigger_generate_storyboard_draft",
+    "id": "a21e6532-46c2-4349-a341-bece150aeaad",
+    "event_type": "custom_api",
+    "entity_name": "project",
+    "event_optype": "update",
+    "event_stage": "after",
+    "entry_conditions": [{ "field": "status", "operator": "==", "value": "generating_content" }],
+    "destination_config": {
+      "target_entity": "generate_storyboard_draft",
+      "field_mapping": { "_query.project_id": "source.id" }
+    }
+  },
+  {
+    "name": "trigger_generate_voiceover",
+    "id": "6e799114-f6dc-47a3-ae12-5c189e2ecb37",
+    "event_type": "custom_api",
+    "entity_name": "project",
+    "event_optype": "update",
+    "event_stage": "after",
+    "entry_conditions": [{ "field": "status", "operator": "==", "value": "generating_voice" }],
+    "destination_config": {
+      "target_entity": "generate_voiceover",
+      "field_mapping": { "_query.project_id": "source.id" }
+    }
+  },
+  {
+    "name": "trigger_generate_cinematic_direction",
+    "id": "804c0617-ddd4-464d-bfde-7cc0caa37405",
+    "event_type": "custom_api",
+    "entity_name": "project",
+    "event_optype": "update",
+    "event_stage": "after",
+    "entry_conditions": [{ "field": "status", "operator": "==", "value": "generating_direction" }],
+    "destination_config": {
+      "target_entity": "generate_cinematic_direction",
+      "field_mapping": { "_query.project_id": "source.id" }
+    }
+  },
+  {
+    "name": "trigger_start_render",
+    "id": "a8f8fabf-5c14-424a-ab5b-2a1bf12fa3ad",
+    "event_type": "custom_api",
+    "entity_name": "project",
+    "event_optype": "update",
+    "event_stage": "after",
+    "entry_conditions": [{ "field": "status", "operator": "==", "value": "rendering" }],
+    "destination_config": {
+      "target_entity": "start_render",
+      "field_mapping": { "_query.project_id": "source.id" }
+    },
+    "note": "This is the ONE stage transition the app's UI actually needs a button for in the new pipeline — every other stage transition happens automatically as a side effect of the previous logicblock's own update_entity step advancing project.status. The render worker call itself happens INSIDE start_render (a webhook step), not via a separate event."
+  },
+  {
+    "name": "project notification.email",
+    "id": "59d8d326-877e-43c5-b5be-f742c6875c33",
+    "event_type": "notification.email",
+    "entity_name": "project",
+    "event_optype": "update",
+    "event_stage": "after",
+    "entry_conditions": [
+      { "field": "status", "operator": "==", "value": "ready" }
+    ],
+    "destination_config": {
+      "to": "YOUR-ALERT-EMAIL",
+      "subject": "Ready: {{source.name}}",
+      "body": "<p><b>{{source.name}}</b> finished rendering.</p>",
+      "format": "html"
+    },
+    "rationale": "UPDATED — condition value changed from 'published' to 'ready' to match the new status enum. Still doesn't solve the actual owner-email problem, since Project has no email field to source {{source.*}} from — 'to' is still the literal placeholder string 'YOUR-ALERT-EMAIL', not a real address. Needs a real destination (e.g. a stored owner_email field, or resolve via context at a different layer) before this is more than a placeholder.",
+    "_correction": "The destination_config field is 'to', not 'to_email' as this file previously documented — confirmed live: create_event rejected 'to_email' with 'missing required field(s): to'. All 5 events under project (this one + the 4 trigger_* events) were deleted-in-effect and recreated fresh this session (list_events on 'project' came back empty before recreation, meaning they weren't actually live despite the earlier '_supersedes' note claiming so) — ids above are the new live ones."
+  }
+]
