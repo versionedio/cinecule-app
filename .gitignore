@@ -149,3 +149,7 @@ vite.config.ts.timestamp-*
 .turbo
 
 .DS_Store
+
+# Local render test output
+render-fixture.mp4
+*.mp4

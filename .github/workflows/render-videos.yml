@@ -1,0 +1,63 @@
+name: Render videos
+
+# Polls for queued renders (exportasset status "created", created when a project reaches
+# "rendering") and renders one per run. The poll itself is cheap: it only needs Node, so the
+# heavy install/build/render steps are skipped when nothing is queued.
+#
+# Scheduled workflows only run from the default branch.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One render at a time: claiming an asset by status is only race-free because of this.
+concurrency:
+  group: render-videos
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      VITE_ORG_API_ENDPOINT: ${{ vars.VITE_ORG_API_ENDPOINT || secrets.VITE_ORG_API_ENDPOINT }}
+      VITE_ORG_CODE: ${{ vars.VITE_ORG_CODE || secrets.VITE_ORG_CODE }}
+      VITE_CLIENT_ID: ${{ vars.VITE_CLIENT_ID || secrets.VITE_CLIENT_ID }}
+      VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+      # A tenant user the render job signs in as (read access to the pipeline entities,
+      # write access to exportasset, permission to run the render_complete logic block).
+      NS_EMAIL: ${{ secrets.NS_EMAIL }}
+      NS_PASSWORD: ${{ secrets.NS_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Claim a queued render
+        id: claim
+        run: node scripts/render/claim.mjs
+
+      - name: Install dependencies
+        if: steps.claim.outputs.has_work == 'true'
+        run: npm ci
+
+      - name: Install Chromium and ffmpeg
+        if: steps.claim.outputs.has_work == 'true'
+        run: |
+          npx playwright install --with-deps chromium
+          ffmpeg -version >/dev/null 2>&1 || sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Build the app (the render page is part of it)
+        if: steps.claim.outputs.has_work == 'true'
+        run: npm run build
+
+      - name: Render
+        if: steps.claim.outputs.has_work == 'true'
+        run: node scripts/render/render.mjs --asset "${{ steps.claim.outputs.asset_id }}"

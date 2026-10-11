@@ -13,13 +13,11 @@ interface UploadUrlResponse {
  *  2. PUT the raw bytes straight to S3 (no auth header — the URL is self-authenticating)
  * Returns { s3Key, cdnUrl }: save the s3Key on the record, use cdnUrl for display.
  *
- * `contentType` defaults to the file's real MIME type, but some s3 fields are
- * configured in the console with a single FIXED content type (e.g.
- * contentsource.file_key is pinned to "application/octet-stream" — confirmed
- * via describe_entity) rather than accepting whatever the upload declares.
- * The backend validates the declared contentType against that fixed value
- * and rejects a mismatch, so callers targeting a fixed-content-type field
- * must pass that exact value here instead of relying on file.type.
+ * `contentType` defaults to the file's real MIME type, which is what "file"
+ * columns validate against an allow-list ("application/octet-stream" is
+ * rejected). Some s3-typed fields are instead pinned to a single fixed content
+ * type; callers targeting one of those must pass that exact value here.
+ * contentLength is required by the backend and is taken from file.size.
  */
 export async function uploadEntityFile(
   entity: string,
@@ -32,7 +30,7 @@ export async function uploadEntityFile(
   const info = await api.get<UploadUrlResponse>(
     `/uploadurl/${entity}/${field}?contentType=${encodeURIComponent(
       resolvedContentType
-    )}&fileExtension=${encodeURIComponent(ext)}`
+    )}&fileExtension=${encodeURIComponent(ext)}&contentLength=${file.size}`
   );
   const put = await fetch(info.uploadUrl, {
     method: "PUT",

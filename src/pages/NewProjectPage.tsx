@@ -71,28 +71,17 @@ export default function NewProjectPage() {
         ? trimmed.slice(0, 60)
         : (files[0]?.name.replace(/\.[^.]+$/, "") ?? "Untitled project");
 
-      const project = await entityService.create<Project>(ENTITY_NAMES.project, {
-        name,
-        video_type: "marketing",
-        canvas_aspect_ratio: "16:9",
-        status: "draft"
-      });
-
+      // Upload and read every file BEFORE creating the project, so a failed
+      // upload can't leave an empty draft project behind.
+      const sourceBodies: Record<string, unknown>[] = [];
       for (const file of files) {
         const sourceType = detectSourceType(file);
         if (sourceType === "pdf" || sourceType === "image") {
-          // contentsource.file_key is configured in the console with a fixed
-          // S3 content type (application/octet-stream) rather than accepting
-          // the upload's real MIME type — must match exactly or the backend
-          // rejects it with a "contentType mismatch" error.
-          const { s3Key, cdnUrl } = await uploadEntityFile(
-            ENTITY_NAMES.contentSource,
-            "file_key",
-            file,
-            "application/octet-stream"
-          );
-          await entityService.create(ENTITY_NAMES.contentSource, {
-            project_id: project.id,
+          // contentsource.file_key is a "file" column: the backend validates the
+          // declared contentType against an allow-list, so send the file's real
+          // MIME type (application/pdf, image/png, ...), not a generic one.
+          const { s3Key, cdnUrl } = await uploadEntityFile(ENTITY_NAMES.contentSource, "file_key", file);
+          sourceBodies.push({
             source_type: sourceType,
             title: file.name,
             file_key: s3Key,
@@ -104,35 +93,44 @@ export default function NewProjectPage() {
             status: "draft"
           });
         } else {
-          const raw = await readFileAsText(file);
-          await entityService.create(ENTITY_NAMES.contentSource, {
-            project_id: project.id,
+          sourceBodies.push({
             source_type: "text",
             title: file.name,
-            raw_text: raw,
+            raw_text: await readFileAsText(file),
             status: "draft"
           });
         }
       }
+      if (extractedUrl) sourceBodies.push({ source_type: "url", url: extractedUrl, status: "draft" });
+      if (instructionText) sourceBodies.push({ source_type: "query", raw_text: instructionText, status: "draft" });
 
-      if (extractedUrl) {
-        await entityService.create(ENTITY_NAMES.contentSource, {
-          project_id: project.id,
-          source_type: "url",
-          url: extractedUrl,
-          status: "draft"
-        });
-      }
-      if (instructionText) {
-        await entityService.create(ENTITY_NAMES.contentSource, {
-          project_id: project.id,
-          source_type: "query",
-          raw_text: instructionText,
-          status: "draft"
-        });
+      const project = await entityService.create<Project>(ENTITY_NAMES.project, {
+        name,
+        video_type: "marketing",
+        canvas_aspect_ratio: "16:9",
+        status: "draft"
+      });
+
+      // If any source fails to save, remove what was created so the user
+      // doesn't end up with a half-built project.
+      const createdSourceIds: string[] = [];
+      try {
+        for (const body of sourceBodies) {
+          const source = await entityService.create<{ id: string }>(ENTITY_NAMES.contentSource, {
+            project_id: project.id,
+            ...body
+          });
+          createdSourceIds.push(source.id);
+        }
+      } catch (e) {
+        await Promise.allSettled([
+          ...createdSourceIds.map((sid) => entityService.remove(ENTITY_NAMES.contentSource, sid)),
+          entityService.remove(ENTITY_NAMES.project, project.id)
+        ]);
+        throw e;
       }
 
-      navigate(`/projects/${project.id}`);
+      navigate(`/projects/${project.id}`, { state: { autoStart: true } });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't create the project.");
       setBusy(false);

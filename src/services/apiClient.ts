@@ -1,9 +1,11 @@
 /**
  * Base API client for nostackai.
  * - Reads org config from .env (see .env.example)
- * - Keeps the x-nostackai-token in memory only (not localStorage)
+ * - Holds the x-nostackai-token in memory and mirrors it to localStorage so a
+ *   page reload or reopened tab stays signed in (AuthProvider validates it on boot)
  * - Attaches it as the `authorization` header (no "Bearer" prefix)
  * - Silently refreshes the token every 45 minutes and retries once on 401
+ * - Dispatches AUTH_EXPIRED_EVENT when a 401 can't be recovered, so the app can sign out
  */
 
 const ORG_API_ENDPOINT = import.meta.env.VITE_ORG_API_ENDPOINT as string;
@@ -13,8 +15,30 @@ export const CLIENT_ID = import.meta.env.VITE_CLIENT_ID as string;
 
 export const appBase = () => `${ORG_API_ENDPOINT}/app/${ORG_CODE}`;
 
+export const AUTH_EXPIRED_EVENT = "cinecule:auth-expired";
+const TOKEN_STORAGE_KEY = "cinecule.token";
+
 let token: string | null = null;
 let refreshTimer: number | undefined;
+
+// localStorage can throw (private windows, blocked site data), so the app must
+// keep working in memory when it does.
+function persistToken(t: string | null) {
+  try {
+    if (t) window.localStorage.setItem(TOKEN_STORAGE_KEY, t);
+    else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    /* in-memory only */
+  }
+}
+
+export function getStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
 export class ApiError extends Error {
   status: number;
@@ -28,6 +52,7 @@ export class ApiError extends Error {
 
 export function setToken(t: string | null) {
   token = t;
+  persistToken(t);
   if (refreshTimer) window.clearInterval(refreshTimer);
   if (t) {
     refreshTimer = window.setInterval(refreshToken, 45 * 60 * 1000);
@@ -47,6 +72,7 @@ export async function refreshToken(): Promise<boolean> {
     const fresh = res.headers.get("x-nostackai-token");
     if (res.ok && fresh) {
       token = fresh;
+      persistToken(fresh);
       return true;
     }
   } catch {
@@ -74,6 +100,9 @@ async function request<T>(
   if (res.status === 401 && retryOn401 && token) {
     const ok = await refreshToken();
     if (ok) return request<T>(path, options, false);
+    // Refresh failed: the session is really gone, not just a stale token.
+    setToken(null);
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
   }
 
   const text = await res.text();
