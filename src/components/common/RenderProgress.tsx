@@ -45,12 +45,14 @@ export default function RenderProgress({
   /** Called once when the render reaches "ready" or "failed", so the page can refresh the project. */
   onFinished?: () => void;
 }) {
-  const [snap, setSnap] = useState<Snapshot>({ asset: null, receivedAt: Date.now(), changedAt: Date.now() });
-  const [now, setNow] = useState(Date.now());
+  const [snap, setSnap] = useState<Snapshot>(() => ({ asset: null, receivedAt: Date.now(), changedAt: Date.now() }));
+  const [now, setNow] = useState(() => Date.now());
   const [videoSeconds, setVideoSeconds] = useState(0);
   const finished = useRef(false);
   const onFinishedRef = useRef(onFinished);
-  onFinishedRef.current = onFinished;
+  useEffect(() => {
+    onFinishedRef.current = onFinished;
+  }, [onFinished]);
 
   // Poll the newest video asset for this project.
   useEffect(() => {
