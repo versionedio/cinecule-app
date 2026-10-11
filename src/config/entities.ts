@@ -198,6 +198,8 @@ export interface Interaction {
   duration?: number;
   label?: string;
   sort_order?: number;
+  // false when the director rejected the proposal; kept for the editor but not rendered.
+  active?: boolean;
   created_at?: string;
 }
 
