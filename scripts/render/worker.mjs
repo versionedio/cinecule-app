@@ -14,7 +14,7 @@ let failures = 0;
 
 while (assetId && rendered < MAX_RENDERS_PER_RUN) {
   console.log(`\n=== Rendering ${assetId} (${rendered + 1}) ===`);
-  const result = spawnSync(process.execPath, ["scripts/render/render.mjs", "--asset", assetId, ...(process.env.RENDER_ART === "1" ? ["--art"] : [])], { stdio: "inherit" });
+  const result = spawnSync(process.execPath, ["scripts/render/render.mjs", "--asset", assetId], { stdio: "inherit" });
   rendered++;
   if (result.status !== 0) failures++;
   // A fresh login each time: a long render can outlive the previous token.

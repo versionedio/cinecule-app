@@ -2,14 +2,13 @@ import type { WordTiming } from "./director";
 import { normalizeToken } from "./director";
 
 /**
- * Clip art for scenes, chosen and placed by rules instead of by guesswork.
+ * Clip art for PICTURE scenes. The storyboard names one icon per picture scene on purpose
+ * (`data-art="dog"`); nothing is guessed from stray spoken words.
  *
- * - The art library is bundled (Lucide icons, ISC license) and searched by tag; nothing is drawn or
- *   invented at render time.
- * - An icon is used only when a word that is actually SPOKEN in the scene matches its name or one
- *   of its tags strongly. A weak or ambiguous match gets no art at all.
- * - It is placed only in free space (or a slot the layout reserved), never over text.
- * - It arrives when its word is said, like every other block of content.
+ * - The art library is bundled (Lucide icons, ISC license); nothing is drawn or invented at render time.
+ * - A picture scene shows that one icon, large, drawn on stroke by stroke. Words scenes show no art.
+ * - A name that matches no icon is looked up through hand-picked synonyms; if that fails too, the
+ *   decision is logged and the scene falls back to the strongest literal match in its narration.
  */
 
 interface CatalogEntry { t: string[]; b: string }
@@ -90,6 +89,16 @@ export function buildIndex(catalog: Catalog): ArtIndex {
   return { catalog, byWord };
 }
 
+/** The icon a storyboard-chosen subject ("dog", "paw print", "puppy") stands for, or null. */
+export function resolveSubject(index: ArtIndex, subject: string): string | null {
+  const raw = subject.toLowerCase().trim().replace(/[\s_]+/g, "-");
+  if (!raw) return null;
+  if (index.catalog[raw]) return raw;
+  const hits = index.byWord.get(key(raw.replace(/-/g, " "))) ?? index.byWord.get(key(raw));
+  if (hits && hits.length) return hits.slice().sort((a, b) => b.score - a.score)[0].name;
+  return ALIASES[raw] && index.catalog[ALIASES[raw]] ? ALIASES[raw] : null;
+}
+
 export interface ArtPick { name: string; word: string; start: number; score: number }
 
 /** Best icon for each spoken word, then the strongest few, spaced apart and never repeated. */
@@ -118,47 +127,21 @@ export function pickArt(index: ArtIndex, words: WordTiming[], opts: { max?: numb
 export interface Rect { x: number; y: number; w: number; h: number }
 
 /**
- * Space for a piece of art that no text occupies: a slot the layout reserved (an element whose id
- * ends in "-art"), otherwise the first free spot among the margins and sides, largest size first.
+ * Where a picture scene's icons go: one icon centred, or two the same size side by side with an
+ * even gap, the pair centred as a whole.
  */
-export function findArtSlot(doc: Document, canvas: { width: number; height: number }, occupied: Rect[]): { rect: Rect; reserved: boolean } | null {
-  const reserved = doc.querySelector<HTMLElement>("[id$='-art']");
-  if (reserved) {
-    const r = reserved.getBoundingClientRect();
-    if (r.width > 120 && r.height > 120) {
-      const size = Math.min(r.width, r.height, 420);
-      return { rect: { x: r.left + (r.width - size) / 2, y: r.top + (r.height - size) / 2, w: size, h: size }, reserved: true };
-    }
-  }
-  const { width: W, height: H } = canvas;
-  const hits = (a: Rect, b: Rect, pad: number) => a.x < b.x + b.w + pad && a.x + a.w + pad > b.x && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y;
-  for (const size of [300, 240, 190]) {
-    const m = 70;
-    const slots: Rect[] = [
-      { x: W - m - size, y: (H - size) / 2, w: size, h: size }, // right, middle
-      { x: m, y: (H - size) / 2, w: size, h: size }, // left, middle
-      { x: W - m - size, y: m, w: size, h: size }, // top right
-      { x: W - m - size, y: H - m - size, w: size, h: size }, // bottom right
-      { x: m, y: m, w: size, h: size }, // top left
-      { x: m, y: H - m - size, w: size, h: size } // bottom left
-    ];
-    const free = slots.find((s) => !occupied.some((o) => hits(s, o, 36)));
-    if (free) return { rect: free, reserved: false };
-  }
-  return null;
-}
-
-/** Boxes of everything on screen that carries text, so art never covers it. */
-export function occupiedBoxes(doc: Document): Rect[] {
-  const boxes: Rect[] = [];
-  doc.body.querySelectorAll<HTMLElement>("*").forEach((el) => {
-    if (el.id === "__fx" || el.closest("#__fx") || el.closest("[id^='__art']")) return;
-    const hasOwnText = Array.from(el.childNodes).some((n) => n.nodeType === 3 && (n.nodeValue ?? "").trim());
-    if (!hasOwnText) return;
-    const r = el.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) boxes.push({ x: r.left, y: r.top, w: r.width, h: r.height });
-  });
-  return boxes;
+export function findArtSlots(doc: Document, count: number): Rect[] {
+  const hero = doc.querySelector<HTMLElement>("[data-art]");
+  if (!hero || count < 1) return [];
+  const r = hero.getBoundingClientRect();
+  if (r.width <= 120 || r.height <= 120) return [];
+  const n = Math.min(2, count);
+  const gap = n === 2 ? r.width * 0.06 : 0;
+  const size = Math.min(r.height * (n === 1 ? 0.78 : 0.6), (r.width * 0.9 - gap * (n - 1)) / n);
+  const total = size * n + gap * (n - 1);
+  const y = r.top + (r.height - size) / 2;
+  const x0 = r.left + (r.width - total) / 2;
+  return Array.from({ length: n }, (_, i) => ({ x: x0 + i * (size + gap), y, w: size, h: size }));
 }
 
 const ACCENT = "242,181,74";
@@ -177,7 +160,9 @@ export function insertArt(doc: Document, index: ArtIndex, pick: ArtPick, rect: R
   const wrap = doc.createElement("div");
   wrap.id = `__art-${n}`;
   wrap.setAttribute("style", `position:absolute;left:${rect.x}px;top:${rect.y}px;width:${rect.w}px;height:${rect.h}px;pointer-events:none;`);
-  wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${rect.w}" height="${rect.h}" fill="none" stroke="rgb(${ACCENT})" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="filter:url(#__wobble)">${index.catalog[pick.name].b}</svg>`;
+  wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${rect.w}" height="${rect.h}" fill="none" stroke="rgb(${ACCENT})" stroke-width="${rect.w > 400 ? 1.1 : 1.5}" stroke-linecap="round" stroke-linejoin="round" style="filter:url(#__wobble)">${index.catalog[pick.name].b}</svg>`;
+  // Every stroke is normalised to length 1 so the renderer can draw it on by sliding one dash offset.
+  wrap.querySelectorAll("path,line,polyline,polygon,circle,rect,ellipse").forEach((el) => el.setAttribute("pathLength", "1"));
   doc.body.appendChild(wrap);
   return wrap;
 }

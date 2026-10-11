@@ -40,15 +40,20 @@ export const FIXTURE: RenderData = {
       html_content: column("#10131c", `<h2 id="s2-title" style="font-size:84px;margin:0">Cats and people</h2>${row("s2-item-1", "Tamed in the Near East around 7500 BCE")}${row("s2-item-2", "Roughly 600 million cats live worldwide")}${row("s2-item-3", "Average lifespan about 13 years")}`)
     },
     {
-      ...base, id: "sl4", name: "Scene 3b", sort_order: 2, duration: 9.5, transition: "fade", transition_duration: 0.6, narration_text: "",
+      // A picture scene: no text, one icon named by the storyboard.
+      ...base, id: "slp", name: "Picture", sort_order: 2, duration: 6.5, transition: "fade", transition_duration: 0.6, narration_text: "",
+      html_content: `<div id="sp-art" data-art="cat,house" style="position:absolute;inset:0;background:#10131c"></div>`
+    },
+    {
+      ...base, id: "sl4", name: "Scene 3b", sort_order: 3, duration: 9.5, transition: "fade", transition_duration: 0.6, narration_text: "",
       html_content: column("#0f1218", `<h2 id="s4-title" style="font-size:84px;margin:0">Hunters of the twilight</h2>${row("s4-item-1", "Hunt at dawn and dusk")}${row("s4-item-2", "Sleep twelve to sixteen hours a day")}`)
     },
     {
-      ...base, id: "sl5", name: "Scene 3c", sort_order: 3, duration: 8, transition: "slide-right", transition_duration: 0.6, narration_text: "",
+      ...base, id: "sl5", name: "Scene 3c", sort_order: 4, duration: 8, transition: "slide-right", transition_duration: 0.6, narration_text: "",
       html_content: column("#12100f", `<h2 id="s5-title" style="font-size:84px;margin:0">Why it matters</h2>${row("s5-item-1", "Many things change over time")}`)
     },
     {
-      ...base, id: "sl3", name: "Scene 3", sort_order: 4, duration: 6, transition: "zoom-in", transition_duration: 0.6, narration_text: "",
+      ...base, id: "sl3", name: "Scene 3", sort_order: 5, duration: 6, transition: "zoom-in", transition_duration: 0.6, narration_text: "",
       html_content: frame("#14100c", `<h1 id="s3-title" style="font-size:100px;margin:0">Thanks for watching</h1>`)
     }
   ] as unknown as RenderData["slides"],
@@ -72,6 +77,7 @@ export const FIXTURE: RenderData = {
       slide_id: "sl2",
       words: narrate("Cats were tamed in the Near East around 7500 BCE, drawn to early farms by rodents. Today roughly 600 million cats live worldwide, in homes and on streets alike.", 0.5)
     },
+    { slide_id: "slp", words: narrate("For thousands of years the cat has shared our homes.", 0.5) },
     {
       slide_id: "sl4",
       words: narrate("Cats see well in dim light, so they hunt at dawn and dusk, then sleep for twelve to sixteen hours a day, curled up in a warm spot.", 0.4)

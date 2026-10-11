@@ -2,7 +2,7 @@
 //   Chromium steps the /render page frame by frame -> ffmpeg (with the voiceover clips placed at each
 //   slide's start) -> upload -> render_complete.
 //
-//   node scripts/render/render.mjs --asset <exportasset id> [--dry-run --out file.mp4] [--debug] [--art]   (--debug burns timing info into the frames; --art adds clip art)
+//   node scripts/render/render.mjs --asset <exportasset id> [--dry-run --out file.mp4] [--debug] [--no-art]   (--debug burns timing info into the frames; --no-art turns off picture-scene icons)
 //   node scripts/render/render.mjs --fixture [--res 1920x1080] [--fps 30] [--max-seconds 6]   (no login, no upload)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -52,9 +52,9 @@ const run = (cmd, args) =>
     p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}: ${err.slice(-400)}`))));
   });
 
-// Optional render-page switches: ?debug=1 burns timing info into frames, ?art=1 turns on clip art.
+// Optional render-page switches: ?debug=1 burns timing info into frames, ?art=0 turns off picture-scene icons.
 function renderQuery({ debug, art }) {
-  const q = [debug ? "debug=1" : "", art ? "art=1" : ""].filter(Boolean).join("&");
+  const q = [debug ? "debug=1" : "", art ? "" : "art=0"].filter(Boolean).join("&");
   return q ? `?${q}` : "";
 }
 
@@ -153,7 +153,7 @@ async function runFixture(args) {
   const { server, port } = await serveDist();
   try {
     const res = await renderVideo({
-      url: `http://localhost:${port}/render/fixture${renderQuery(args)}`,
+      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"] })}`,
       resolution: args.res || "1920x1080",
       fps: Number(args.fps) || 30,
       maxSeconds: args["max-seconds"] ? Number(args["max-seconds"]) : undefined,
@@ -177,7 +177,7 @@ async function runFixture(args) {
 }
 
 // dryRun: render to `out` and stop — no upload, no status changes (the asset is only read).
-async function runAsset(assetId, { dryRun = false, out, debug = false, art = false } = {}) {
+async function runAsset(assetId, { dryRun = false, out, debug = false, art = true } = {}) {
   const token = await login();
   const api = client(token);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "render-"));
@@ -264,7 +264,7 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = fal
 
 const args = parseArgs(process.argv.slice(2));
 if (args.fixture) await runFixture(args);
-else if (args.asset) await runAsset(args.asset, { dryRun: Boolean(args["dry-run"]), out: typeof args.out === "string" ? args.out : undefined, debug: Boolean(args.debug), art: Boolean(args.art) });
+else if (args.asset) await runAsset(args.asset, { dryRun: Boolean(args["dry-run"]), out: typeof args.out === "string" ? args.out : undefined, debug: Boolean(args.debug), art: !args["no-art"] });
 else {
   console.error("Usage: render.mjs --asset <id> | --fixture [--res WxH] [--fps N] [--max-seconds N] [--out file]");
   process.exit(2);
