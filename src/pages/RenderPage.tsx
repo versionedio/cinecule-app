@@ -1,20 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { entityService } from "@/services/entityService";
-import {
-  CameraShot, CursorTimelinePoint, ENTITY_NAMES, GeneratedHtml, Interaction, Project, VideoEffectCue
-} from "@/config/entities";
+import { ENTITY_NAMES, GeneratedHtml, Interaction, Project } from "@/config/entities";
 import {
   ActiveEffect, RenderData, SlideTiming, buildSlideTimings, cameraAt, cameraTransform, canvasSize,
-  clamp, cursorAt, easeOut, effectsAt, slideStateAt
+  clamp, easeOut, slideStateAt
 } from "@/render/timeline";
+import { Decision, Intensity, Measured, PlannedEffect, PlannedReveal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
 import { FIXTURE } from "@/render/fixture";
+import { ArtIndex, Rect, buildIndex, findArtSlot, insertArt, loadCatalog, occupiedBoxes, pickArt } from "@/render/art";
 
 /**
- * Headless video render surface. Not a user-facing page: the render script
- * opens it in Chromium, waits for `window.__render.ready`, then calls
- * `setTime(t)` and screenshots once per frame. Everything is drawn from `t`
- * alone (no real-time animation), so frames are repeatable.
+ * Headless video render surface. Not a user-facing page: the render script opens it in Chromium,
+ * waits for `window.__render.ready`, then calls `setTime(t)` and screenshots once per frame.
+ * Everything is drawn from `t` alone (no real-time animation), so frames are repeatable.
+ *
+ * What zooms and highlights actually happen is decided by the deterministic director
+ * (src/render/director.ts) from the real word timings and the real measured layout.
  */
 
 export interface RenderInfo {
@@ -22,6 +24,8 @@ export interface RenderInfo {
   height: number;
   duration: number;
   slides: { id: string; start: number; end: number }[];
+  /** Every proposal the director kept or dropped, with the reason. */
+  decisions: (Decision & { scene: string })[];
 }
 
 declare global {
@@ -30,44 +34,54 @@ declare global {
   }
 }
 
-const ACCENT = "#f2b54a";
+const ACCENT = "242,181,74";
 // Slide HTML may carry its own CSS animation; freeze it so a frame depends only on `t`.
 const FREEZE_CSS = "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}html,body{margin:0;height:100%;overflow:hidden}";
 
+function parseWords(json: unknown): WordTiming[] {
+  try {
+    const parsed = typeof json === "string" ? JSON.parse(json) : json;
+    return Array.isArray(parsed) ? parsed.filter((w) => w && typeof w.w === "string" && Number.isFinite(w.s)) : [];
+  } catch {
+    return [];
+  }
+}
+
 async function loadData(projectId: string): Promise<RenderData> {
   const q = { project_id: projectId, pagesize: 100 };
-  const [project, slides, interactions, shots, cues, points] = await Promise.all([
+  const [project, slides, interactions, audio] = await Promise.all([
     entityService.get<Project>(ENTITY_NAMES.project, projectId),
     entityService.list<GeneratedHtml>(ENTITY_NAMES.generatedHtml, q),
     entityService.list<Interaction>(ENTITY_NAMES.interaction, q),
-    entityService.list<CameraShot>(ENTITY_NAMES.cameraShot, q),
-    entityService.list<VideoEffectCue>(ENTITY_NAMES.videoEffectCue, q),
-    entityService.list<CursorTimelinePoint>(ENTITY_NAMES.cursorTimelinePoint, q)
+    entityService.list<{ slide_id: string; words_json?: string }>("audio", { ...q, kind: "voiceover" })
   ]);
   return {
     project,
     slides: slides.data ?? [],
-    interactions: interactions.data ?? [],
-    shots: shots.data ?? [],
-    cues: cues.data ?? [],
-    points: points.data ?? []
+    interactions: (interactions.data ?? []).filter((i) => i.active !== false),
+    audio: (audio.data ?? []).map((a) => ({ slide_id: a.slide_id, words: parseWords(a.words_json) }))
   };
 }
 
 interface Layer {
   timing: SlideTiming;
+  index: number;
   root: HTMLDivElement;
+  // Slow always-on drift underneath everything, so no scene is ever frozen.
+  ambient: HTMLDivElement;
   camera: HTMLDivElement;
   frame: HTMLIFrameElement;
-  cursor: HTMLDivElement;
-  ripple: HTMLDivElement;
   loaded: Promise<void>;
-  shots: CameraShot[];
-  points: CursorTimelinePoint[];
-  interactions: Interaction[];
-  cues: VideoEffectCue[];
+  plan: ScenePlan;
+  words: WordTiming[];
+  // Blocks of content that arrive when the narrator reaches them.
+  reveals: { el: HTMLElement; plan: PlannedReveal }[];
+  // Clip art, placed in free space and arriving with the word it illustrates.
+  arts: { el: HTMLElement; start: number }[];
   // Inline styles of elements an effect touched, so each frame starts clean.
   original: Map<HTMLElement, string | null>;
+  // The words of each read-along target, wrapped in spans so they can be lit one at a time.
+  followSpans: Map<string, HTMLElement[]>;
 }
 
 function safeQuery(doc: Document, selector: string): HTMLElement | null {
@@ -78,43 +92,46 @@ function safeQuery(doc: Document, selector: string): HTMLElement | null {
   }
 }
 
-/**
- * The director AI placed shots and cursor points as guessed percentages, but it can't see the
- * layout, so zooming toward those guesses crops real text. Once a slide has loaded we know where
- * its elements actually are: aim each shot at its element's box (zoomed no further than lets the
- * whole element fit) and send the cursor to real elements only.
- */
-function resolveAgainstLayout(layer: Layer, interactions: Interaction[], width: number, height: number) {
-  const doc = layer.frame.contentDocument;
-  if (!doc?.body) return;
-  const rectOf = (selector: string | undefined) => {
-    const el = selector ? safeQuery(doc, selector) : null;
-    const r = el?.getBoundingClientRect();
-    return r && r.width > 0 && r.height > 0 ? r : null;
-  };
-  const MARGIN = 1.25; // keep a little air around the focused element
-
-  layer.shots = layer.shots.map((shot) => {
-    const r = rectOf(shot.target_selector);
-    if (!r) return { ...shot, zoom: Math.min(Number(shot.zoom) || 1, 1.15) }; // unknown target: stay near full frame
-    const fit = Math.min(width / (r.width * MARGIN), height / (r.height * MARGIN));
-    return {
-      ...shot,
-      x_percent: ((r.left + r.width / 2) / width) * 100,
-      y_percent: ((r.top + r.height / 2) / height) * 100,
-      zoom: Math.max(1, Math.min(Number(shot.zoom) || 1, fit))
-    };
-  });
-
-  const resolved: CursorTimelinePoint[] = [];
-  for (const p of layer.points) {
-    const linked = interactions.find((i) => i.id === p.interaction_id);
-    const r = rectOf(p.selector) ?? rectOf(linked?.target_selector);
-    if (!r) continue; // no real target, no cursor point
-    // Aim at the lower right of the element so the pointer doesn't sit on top of the words.
-    resolved.push({ ...p, x_percent: ((r.left + r.width * 0.72) / width) * 100, y_percent: ((r.top + r.height * 0.72) / height) * 100 });
+/** Text nodes of an element in reading order. */
+function textNodes(el: HTMLElement): Text[] {
+  const doc = el.ownerDocument;
+  const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if ((n.nodeValue ?? "").trim()) nodes.push(n as Text);
   }
-  layer.points = resolved;
+  return nodes;
+}
+
+function measure(doc: Document, selector: string): Measured | null {
+  const el = safeQuery(doc, selector);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return null;
+  const tokens = textNodes(el).flatMap((n) => (n.nodeValue ?? "").split(/\s+/).filter(Boolean));
+  return { box: { x: r.left, y: r.top, w: r.width, h: r.height }, tokens };
+}
+
+/** Wrap every word of the element in a span (same order the director counted them). */
+function wrapWords(el: HTMLElement): HTMLElement[] {
+  const doc = el.ownerDocument;
+  const spans: HTMLElement[] = [];
+  for (const node of textNodes(el)) {
+    const frag = doc.createDocumentFragment();
+    for (const part of (node.nodeValue ?? "").split(/(\s+)/)) {
+      if (!part) continue;
+      if (/^\s+$/.test(part)) {
+        frag.appendChild(doc.createTextNode(part));
+      } else {
+        const span = doc.createElement("span");
+        span.textContent = part;
+        frag.appendChild(span);
+        spans.push(span);
+      }
+    }
+    node.parentNode?.replaceChild(frag, node);
+  }
+  return spans;
 }
 
 function resetEffects(layer: Layer) {
@@ -123,6 +140,7 @@ function resetEffects(layer: Layer) {
     else el.setAttribute("style", style);
   }
   layer.original.clear();
+  for (const spans of layer.followSpans.values()) spans.forEach((s) => s.removeAttribute("style"));
   layer.frame.contentDocument?.getElementById("__fx")?.replaceChildren();
 }
 
@@ -150,67 +168,57 @@ function applyEffect(layer: Layer, fx: ActiveEffect) {
   if (!el) return;
   const e = fx.envelope;
   const r = el.getBoundingClientRect();
-  const raise = () => {
-    touch(layer, el);
-    if (getComputedStyle(el).position === "static") el.style.position = "relative";
-    el.style.zIndex = "1000";
-  };
   const box = (pad: number) => `left:${r.left - pad}px;top:${r.top - pad}px;width:${r.width + pad * 2}px;height:${r.height + pad * 2}px;`;
   const grow = easeOut(fx.elapsed / 0.5);
 
   switch (fx.effect) {
-    case "spotlight":
-      overlay(doc, `${box(14)}border-radius:18px;box-shadow:0 0 0 4000px rgba(0,0,0,${0.68 * e});z-index:999;`);
-      raise();
-      break;
-    case "dim-background":
-      overlay(doc, `inset:0;background:rgba(0,0,0,${0.55 * e});z-index:999;`);
-      raise();
-      break;
-    case "blur-rest":
-      overlay(doc, `inset:0;background:rgba(0,0,0,${0.25 * e});backdrop-filter:blur(${9 * e}px);z-index:999;`);
-      raise();
-      break;
-    case "scale-pop": {
+    case "scale-pop":
       touch(layer, el);
       if (getComputedStyle(el).display === "inline") el.style.display = "inline-block";
       anchorToElement(el);
-      el.style.transform = `scale(${1 + 0.1 * Math.sin(Math.PI * clamp(fx.progress, 0, 1))})`;
+      el.style.transform = `scale(${1 + 0.06 * Math.sin(Math.PI * clamp(fx.progress, 0, 1))})`;
       break;
-    }
     case "glow":
       // drop-shadow follows the actual shape (letters or a card's outline), unlike a rectangular box-shadow.
       touch(layer, el);
-      el.style.filter = `drop-shadow(0 0 ${14 * e}px rgba(242,181,74,${0.95 * e})) drop-shadow(0 0 ${34 * e}px rgba(242,181,74,${0.6 * e}))`;
+      el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${ACCENT},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${ACCENT},${0.55 * e}))`;
       break;
     case "underline":
-      overlay(doc, `left:${r.left}px;top:${r.bottom + 6}px;width:${r.width * grow}px;height:6px;border-radius:3px;background:${ACCENT};opacity:${e};z-index:999;`);
+      overlay(doc, `left:${r.left}px;top:${r.bottom + 6}px;width:${r.width * grow}px;height:6px;border-radius:3px;background:rgb(${ACCENT});opacity:${e};z-index:999;`);
       break;
     case "circle":
-      overlay(doc, `${box(18)}border:5px solid ${ACCENT};border-radius:50%;opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`);
+      overlay(doc, `${box(18)}border:5px solid rgb(${ACCENT});border-radius:50%;opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`);
       break;
     case "wipe-reveal":
-      overlay(doc, `${box(8)}background:rgba(242,181,74,${0.38 * e});border-radius:10px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`);
-      break;
-    case "kinetic-text":
-      touch(layer, el);
-      if (getComputedStyle(el).display === "inline") el.style.display = "inline-block";
-      anchorToElement(el);
-      el.style.transform = `scale(${1 + 0.14 * Math.sin(Math.PI * clamp(fx.progress, 0, 1))})`;
-      el.style.letterSpacing = `${3 * e}px`;
+      overlay(doc, `${box(8)}background:rgba(${ACCENT},${0.34 * e});border-radius:10px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`);
       break;
     default:
       break;
   }
 }
 
-const CURSOR_SVG =
-  '<svg width="34" height="34" viewBox="0 0 24 24" style="filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))"><path d="M4 2l15 9-6.5 1.6L9.6 19z" fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+/** Light the words of a sentence one at a time as they are spoken; words already said stay softly marked. */
+function applyFollow(layer: Layer, planned: PlannedEffect, fx: ActiveEffect, local: number) {
+  const spans = layer.followSpans.get(planned.key);
+  if (!spans || !planned.follow) return;
+  const e = fx.envelope;
+  for (const tok of planned.follow) {
+    const span = spans[tok.index];
+    if (!span) continue;
+    if (local >= tok.s && local < tok.e) {
+      span.style.cssText = `background:rgba(${ACCENT},${0.55 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${ACCENT},${0.55 * e});`;
+    } else if (local >= tok.e) {
+      span.style.cssText = `background:rgba(${ACCENT},${0.2 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${ACCENT},${0.2 * e});`;
+    }
+  }
+}
 
-function buildLayer(host: HTMLElement, timing: SlideTiming, data: RenderData, width: number, height: number): Layer {
+function buildLayer(host: HTMLElement, timing: SlideTiming, index: number, width: number, height: number): Layer {
   const id = timing.slide.id;
   const root = document.createElement("div");
   root.style.cssText = `position:absolute;inset:0;width:${width}px;height:${height}px;visibility:hidden;`;
+  const ambient = document.createElement("div");
+  ambient.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;transform-origin:50% 50%;`;
   const camera = document.createElement("div");
   camera.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;transform-origin:0 0;`;
   const frame = document.createElement("iframe");
@@ -220,43 +228,140 @@ function buildLayer(host: HTMLElement, timing: SlideTiming, data: RenderData, wi
   // readyState can't be trusted, and a late listener could miss the real load.
   const loaded = new Promise<void>((resolve) => frame.addEventListener("load", () => resolve(), { once: true }));
   frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.tailwindcss.com"></script><style>${FREEZE_CSS}</style></head><body>${timing.slide.html_content || ""}<div id="__fx"></div></body></html>`;
-  const cursor = document.createElement("div");
-  cursor.style.cssText = "position:absolute;width:0;height:0;display:none;z-index:5;";
-  cursor.innerHTML = `<div style="position:absolute;left:0;top:0">${CURSOR_SVG}</div>`;
-  const ripple = document.createElement("div");
-  ripple.style.cssText = `position:absolute;left:-30px;top:-30px;width:60px;height:60px;border-radius:50%;border:4px solid ${ACCENT};opacity:0;`;
-  cursor.appendChild(ripple);
-  camera.append(frame, cursor);
-  root.appendChild(camera);
+  camera.appendChild(frame);
+  ambient.appendChild(camera);
+  root.appendChild(ambient);
   host.appendChild(root);
-  return {
-    timing, root, camera, frame, cursor, ripple, loaded, original: new Map(),
-    shots: data.shots.filter((s) => s.slide_id === id),
-    points: data.points.filter((p) => p.slide_id === id),
-    interactions: data.interactions.filter((i) => i.slide_id === id),
-    cues: data.cues.filter((c) => c.slide_id === id)
+  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], original: new Map(), followSpans: new Map() };
+}
+
+/** Once a slide has loaded, let the director decide what really happens in it. */
+function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null, usedArt: Set<string>) {
+  const doc = layer.frame.contentDocument;
+  if (!doc?.body) return;
+  const slide = layer.timing.slide;
+  const words = data.audio.find((a) => a.slide_id === slide.id)?.words ?? [];
+  const proposals = data.interactions
+    .filter((i) => i.slide_id === slide.id)
+    .map((i) => ({ id: i.id, selector: i.target_selector ?? "", text: i.target_text ?? "", action: i.action }));
+
+  // Clip art first, so the camera knows what has to stay in view.
+  const artRects: Rect[] = [];
+  const artDecisions: Decision[] = [];
+  // Clip art: only for words actually spoken, only where it covers nothing.
+  if (art && words.length > 0) {
+    const occupied: Rect[] = occupiedBoxes(doc);
+    let n = 0;
+    for (const pick of pickArt(art, words, { exclude: usedArt })) {
+      const slot = findArtSlot(doc, { width, height }, occupied);
+      const id = `art:${pick.name}`;
+      if (!slot) {
+        artDecisions.push({ id, selector: "", status: "dropped", reason: `"${pick.word}" has art but there is no free space for it` });
+        continue;
+      }
+      if (slot.reserved && n > 0) break; // one reserved slot holds one piece
+      const el = insertArt(doc, art, pick, slot.rect, n++);
+      usedArt.add(pick.name); // each piece of art appears once per video, so the choices stay varied
+      occupied.push(slot.rect);
+      artRects.push(slot.rect);
+      layer.arts.push({ el, start: pick.start });
+      artDecisions.push({ id, selector: "", status: "kept", reason: `"${pick.word}" at ${pick.start.toFixed(1)}s -> ${pick.name}${slot.reserved ? " (reserved slot)" : ""}` });
+    }
+  } else if (art && words.length === 0) {
+    artDecisions.push({ id: "art", selector: "", status: "dropped", reason: "no word timings, so no art" });
+  }
+
+  layer.plan = planScene({
+    duration: layer.timing.end - layer.timing.start,
+    canvas: { width, height },
+    words,
+    proposals,
+    measure: (selector) => measure(doc, selector),
+    intensity: (data.project.director_camera_intensity ?? "medium") as Intensity,
+    keepVisible: artRects
+  });
+  layer.plan.decisions.push(...artDecisions);
+
+  layer.words = words;
+  for (const fx of layer.plan.effects) {
+    if (fx.kind !== "follow") continue;
+    const el = safeQuery(doc, fx.selector);
+    if (el) layer.followSpans.set(fx.key, wrapWords(el));
+  }
+
+  // Blocks of content arrive when the narrator reaches them (or with the scene if never mentioned).
+  const blocks = findBlocks(doc, width, height);
+  const revealPlan = planReveals(
+    blocks.map((el) => ({ selector: el.id, tokens: textNodes(el).flatMap((n) => (n.nodeValue ?? "").split(/\s+/).filter(Boolean)) })),
+    words,
+    layer.timing.end - layer.timing.start
+  );
+  layer.reveals = blocks.map((el, i) => ({ el, plan: revealPlan[i] }));
+
+}
+
+/**
+ * The elements that arrive one by one: outermost elements with an id (the storyboard gives every
+ * major block one). A container that fills most of the frame is looked through to the blocks inside it.
+ */
+function findBlocks(doc: Document, width: number, height: number): HTMLElement[] {
+  const body = doc.body;
+  const out: HTMLElement[] = [];
+  const visit = (parent: Element) => {
+    for (const child of Array.from(parent.children)) {
+      const el = child as HTMLElement;
+      if (el.id.startsWith("__")) continue; // the effects layer and clip art manage themselves
+      if (el.id) {
+        const r = el.getBoundingClientRect();
+        const big = (r.width * r.height) / (width * height) > 0.7;
+        if (big && el.querySelector("[id]")) visit(el);
+        else if (r.width > 0 && r.height > 0) out.push(el);
+      } else {
+        visit(el);
+      }
+    }
   };
+  visit(body);
+  return out;
 }
 
 function poseLayer(layer: Layer, local: number, width: number, height: number) {
-  layer.camera.style.transform = cameraTransform(cameraAt(layer.shots, local), width, height);
+  layer.camera.style.transform = cameraTransform(cameraAt(layer.plan.shots, local), width, height);
+
+  // Slow drift: alternate scenes push in and pull out, with a small sideways glide. Small enough to
+  // stay inside the slide's padding, so it can never crop content.
+  const total = Math.max(1, layer.timing.end - layer.timing.start);
+  const p = clamp(local / total, 0, 1);
+  const dir = layer.index % 2 === 0 ? 1 : -1;
+  const scale = dir > 0 ? 1 + 0.04 * p : 1.04 - 0.04 * p;
+  const glideX = (layer.index % 3 === 0 ? -1 : 1) * 0.012 * width * (p - 0.5);
+  const glideY = (layer.index % 2 === 0 ? 1 : -1) * 0.006 * height * (p - 0.5);
+  layer.ambient.style.transform = `translate(${glideX.toFixed(2)}px, ${glideY.toFixed(2)}px) scale(${scale.toFixed(4)})`;
 
   resetEffects(layer);
-  for (const fx of effectsAt(layer.cues, layer.interactions, local)) applyEffect(layer, fx);
-
-  const cur = cursorAt(layer.points, local);
-  if (!cur) {
-    layer.cursor.style.display = "none";
-    return;
+  // Clip art: arrives with its word, then idles gently so it feels alive but never distracting.
+  for (const { el, start } of layer.arts) {
+    const prog = revealProgress({ selector: "", start: Math.max(0.15, start - 0.35), duration: 0.7, synced: true }, local);
+    const bob = Math.sin((local / 3.2) * Math.PI * 2) * 5;
+    const tilt = Math.sin((local / 4.1) * Math.PI * 2) * 1.5;
+    el.style.opacity = String(prog);
+    el.style.transform = `translateY(${(bob + (1 - prog) * 40).toFixed(1)}px) rotate(${tilt.toFixed(2)}deg) scale(${(0.8 + 0.2 * prog).toFixed(3)})`;
   }
-  layer.cursor.style.display = "block";
-  // Appear just before the first thing it points at, not at the start of the slide.
-  const firstArrive = Math.min(...layer.points.map((p) => Number(p.time)));
-  layer.cursor.style.opacity = String(clamp((local - (firstArrive - 0.5)) / 0.4, 0, 1));
-  layer.cursor.style.left = `${(cur.x / 100) * width}px`;
-  layer.cursor.style.top = `${(cur.y / 100) * height}px`;
-  layer.ripple.style.opacity = cur.click > 0 ? String(1 - cur.click) : "0";
-  layer.ripple.style.transform = `scale(${0.4 + cur.click * 1.3})`;
+  // Arrivals first: an element is hidden and lowered until its moment, then settles into place.
+  for (const { el, plan } of layer.reveals) {
+    const prog = revealProgress(plan, local);
+    if (prog >= 1) continue;
+    touch(layer, el);
+    anchorToElement(el);
+    el.style.opacity = String(prog);
+    el.style.transform = `translateY(${((1 - prog) * 30).toFixed(1)}px) scale(${(0.97 + 0.03 * prog).toFixed(4)})`;
+  }
+  for (const fx of planEffectsAt(layer.plan.effects, local)) {
+    const planned = layer.plan.effects.find((p) => p.key === fx.key);
+    if (!planned) continue;
+    if (planned.kind === "follow") applyFollow(layer, planned, fx, local);
+    else applyEffect(layer, fx);
+  }
 }
 
 function transitionStyle(kind: string, q: number): { opacity: string; transform: string } {
@@ -277,6 +382,9 @@ export default function RenderPage() {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
   const scrub = params.get("scrub") === "1";
+  const debug = params.get("debug") === "1";
+  // Clip art is opt-in (?art=1) until it is switched on for production renders.
+  const artOn = params.get("art") === "1";
   const [duration, setDuration] = useState(0);
   const setTimeRef = useRef<(t: number) => void>(() => undefined);
 
@@ -293,13 +401,20 @@ export default function RenderPage() {
 
       host.style.cssText = `position:relative;width:${width}px;height:${height}px;overflow:hidden;background:#000;`;
       host.replaceChildren();
-      const layers = timings.map((t) => buildLayer(host, t, data, width, height));
+      const layers = timings.map((t, i) => buildLayer(host, t, i, width, height));
 
-      // Every slide must be fully loaded (and Tailwind applied) before the first frame is captured.
+      // Every slide must be fully loaded (and Tailwind applied) before layout is measured.
       await Promise.all(layers.map((l) => l.loaded));
       await Promise.all(layers.map((l) => l.frame.contentDocument?.fonts?.ready));
       await new Promise((r) => setTimeout(r, 800));
-      layers.forEach((l) => resolveAgainstLayout(l, data.interactions, width, height));
+      let art: ArtIndex | null = null;
+      try {
+        if (artOn) art = buildIndex(await loadCatalog());
+      } catch {
+        /* no art library available: scenes simply render without clip art */
+      }
+      const usedArt = new Set<string>();
+      layers.forEach((l) => planLayer(l, data, width, height, art, usedArt));
 
       const setTime = (t: number) => {
         const state = slideStateAt(timings, t);
@@ -320,10 +435,38 @@ export default function RenderPage() {
           }
         });
       };
-      setTimeRef.current = setTime;
-      setTime(0);
+      // Timing debug: burn the clock, the spoken word and the active effects into the frame.
+      let hud: HTMLDivElement | null = null;
+      if (debug) {
+        hud = document.createElement("div");
+        hud.style.cssText = "position:absolute;left:16px;top:16px;z-index:99999;padding:10px 14px;border-radius:8px;background:rgba(0,0,0,.72);color:#9ff;font:600 26px/1.35 ui-monospace,Menlo,monospace;white-space:pre;pointer-events:none;";
+        host.appendChild(hud);
+      }
+      const setTimeWithHud = (t: number) => {
+        setTime(t);
+        if (!hud) return;
+        const state = slideStateAt(timings, t);
+        const layer = layers[state.index];
+        if (!layer) return;
+        const word = layer.words.find((w) => state.local >= w.s && state.local < w.e + 0.04);
+        const active = planEffectsAt(layer.plan.effects, state.local).map((f) => f.key.slice(-6));
+        const cam = cameraAt(layer.plan.shots, state.local);
+        hud.textContent =
+          `t ${t.toFixed(2)}s   ${layer.timing.slide.name} +${state.local.toFixed(2)}s\n` +
+          `word  ${word ? `"${word.w}"  ${word.s.toFixed(2)}-${word.e.toFixed(2)}` : "-"}\n` +
+          `fx    ${active.length ? active.join(", ") : "-"}\n` +
+          `zoom  x${cam.zoom.toFixed(2)}`;
+      };
+      setTimeRef.current = setTimeWithHud;
+      setTimeWithHud(0);
       setDuration(total);
-      return { width, height, duration: total, slides: timings.map((t) => ({ id: t.slide.id, start: t.start, end: t.end })) };
+      return {
+        width,
+        height,
+        duration: total,
+        slides: timings.map((t) => ({ id: t.slide.id, start: t.start, end: t.end })),
+        decisions: layers.flatMap((l) => l.plan.decisions.map((d) => ({ ...d, scene: l.timing.slide.name || l.timing.slide.id })))
+      };
     })();
     ready.catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
 
@@ -332,7 +475,7 @@ export default function RenderPage() {
       cancelled = true;
       delete window.__render;
     };
-  }, [id]);
+  }, [id, debug, artOn]);
 
   return (
     <div style={{ background: "#000", minHeight: "100vh" }}>

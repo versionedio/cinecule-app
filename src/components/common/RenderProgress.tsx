@@ -5,9 +5,16 @@ import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 const POLL_MS = 3000;
-// The render workflow polls for queued work about every 10 minutes.
-const QUEUE_WAIT_TEXT = "up to 10 minutes";
 const STALL_AFTER_MS = 120_000;
+// A queued render normally starts within a minute or two (the platform starts the render workflow
+// as soon as it is queued). Past this, dispatch probably missed and the hourly safety check will pick it up.
+const SLOW_START_MS = 4 * 60_000;
+
+// Record ids are <3-letter prefix><base36 ms timestamp><1 char>, so an id tells us when the asset was queued.
+function queuedAtMs(id: string | undefined): number {
+  const ms = id ? parseInt(id.slice(3, -1), 36) : NaN;
+  return ms > 1.5e12 && ms < 4e12 ? ms : NaN;
+}
 
 /** "about 2 min 10 s", "less than a minute", "a few seconds". */
 export function formatEta(seconds: number): string {
@@ -102,16 +109,21 @@ export default function RenderProgress({
   const stalled = !queued && asset?.status === "processing" && now - snap.changedAt > STALL_AFTER_MS;
 
   if (queued) {
+    const waitedMs = asset ? now - queuedAtMs(asset.id) : 0;
+    const slowStart = Number.isFinite(waitedMs) && waitedMs > SLOW_START_MS;
     const estimate = videoSeconds > 0 ? ` Once it starts, a ${Math.round(videoSeconds)}-second video takes ${formatEta(estimateRenderSeconds(videoSeconds))}.` : "";
     return compact ? (
       <p className="flex items-center gap-2 text-xs text-muted">
-        <Spinner /> Waiting for a render worker
+        <Spinner /> {slowStart ? "Still waiting for a render worker" : "Starting the render"}
       </p>
     ) : (
       <div role="status" className="rounded-[4px] border border-border bg-surface-raised p-4">
-        <p className="flex items-center gap-2 font-medium"><Spinner /> In the render queue</p>
+        <p className="flex items-center gap-2 font-medium"><Spinner /> {slowStart ? "Still waiting for a render worker" : "Starting the render"}</p>
         <p className="mt-1 text-sm text-muted">
-          A render worker picks up new videos {QUEUE_WAIT_TEXT} after you start one.{estimate}
+          {slowStart
+            ? "This is taking longer than usual to start. A backup check runs about once an hour and will start it if the worker doesn't."
+            : "Your video is queued and should start within a minute or two."}
+          {estimate}
         </p>
       </div>
     );
