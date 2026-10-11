@@ -1,6 +1,7 @@
 import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowUp, File as FileIcon, Image as ImageIcon, Link2, Paperclip, Trash2, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, File as FileIcon, Image as ImageIcon, Link2, LogOut, Paperclip, Trash2, X } from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
 import { createProjectFromInput, deleteProject, detectSourceType } from "@/services/projectService";
 import { entityService } from "@/services/entityService";
 import { ContentSource, ENTITY_NAMES, Project, ProjectStatus } from "@/config/entities";
@@ -44,6 +45,7 @@ function requestFromSources(sources: ContentSource[], fallback: string): { text:
 export default function ChatPage() {
   const { id = "new" } = useParams();
   const navigate = useNavigate();
+  const { logout } = useAuth();
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [items, setItems] = useState<Item[]>([]);
@@ -302,18 +304,27 @@ export default function ChatPage() {
         <ArrowLeft className="h-5 w-5" />
       </button>
 
-      {films.length > 0 && (
+      <div className="absolute right-6 top-6 z-20 flex items-center gap-2">
+        {films.length > 0 && (
+          <button
+            onClick={() => {
+              setClearError("");
+              setConfirmClear(true);
+            }}
+            className="flex h-10 items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 text-sm text-foreground/80 backdrop-blur-xl transition-colors hover:bg-white/20 hover:text-foreground"
+          >
+            <Trash2 className="h-4 w-4" />
+            Clear chat
+          </button>
+        )}
         <button
-          onClick={() => {
-            setClearError("");
-            setConfirmClear(true);
-          }}
-          className="absolute right-6 top-6 z-20 flex h-10 items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 text-sm text-foreground/80 backdrop-blur-xl transition-colors hover:bg-white/20 hover:text-foreground"
+          onClick={logout}
+          className="flex h-10 items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 text-sm text-foreground/80 backdrop-blur-xl transition-colors hover:bg-white/20 hover:text-foreground"
         >
-          <Trash2 className="h-4 w-4" />
-          Clear chat
+          <LogOut className="h-4 w-4" />
+          Sign out
         </button>
-      )}
+      </div>
 
       <Dialog open={confirmClear} onOpenChange={(open) => !clearing && setConfirmClear(open)}>
         <DialogContent>

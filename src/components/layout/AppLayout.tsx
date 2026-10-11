@@ -1,6 +1,6 @@
 import { ReactNode, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Clapperboard, LayoutDashboard, LogOut, Menu, Plug, User, X } from "lucide-react";
+import { Clapperboard, LayoutDashboard, LogOut, Menu, User, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { useAuth } from "@/hooks/useAuth";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -10,7 +10,6 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/projects", label: "Projects", icon: Clapperboard },
-  { path: "/integrations", label: "Integrations", icon: Plug },
   { path: "/profile", label: "Profile", icon: User }
 ];
 
