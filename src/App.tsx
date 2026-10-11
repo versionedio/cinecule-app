@@ -6,8 +6,7 @@ import HomePage from "@/pages/HomePage";
 import AuthPage from "@/pages/AuthPage";
 import DashboardPage from "@/pages/DashboardPage";
 import ProjectsPage from "@/pages/ProjectsPage";
-import NewProjectPage from "@/pages/NewProjectPage";
-import ProjectDetailPage from "@/pages/ProjectDetailPage";
+import ChatPage from "@/pages/ChatPage";
 import ProfilePage from "@/pages/ProfilePage";
 import IntegrationsPage from "@/pages/IntegrationsPage";
 import StoryboardEditorPage from "@/pages/StoryboardEditorPage";
@@ -30,15 +29,14 @@ export default function App() {
     <BrowserRouter>
       {loggedIn ? (
         <Routes>
-          {/* Full-page takeover — no sidebar/header chrome */}
-          <Route path="/projects/new" element={<NewProjectPage />} />
+          {/* Full-page chat — no sidebar/header chrome. "new" starts a film; any other id reopens that film's conversation. */}
+          <Route path="/projects/:id" element={<ChatPage />} />
           {/* Headless render surface used by the render workflow; no chrome */}
           <Route path="/render/:id" element={<RenderPage />} />
 
           <Route element={<AppLayout><Outlet /></AppLayout>}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
-            <Route path="/projects/:id" element={<ProjectDetailPage />} />
             <Route path="/projects/:id/storyboard" element={<StoryboardEditorPage />} />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/integrations" element={<IntegrationsPage />} />
