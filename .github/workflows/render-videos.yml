@@ -35,6 +35,8 @@ jobs:
       # write access to exportasset, permission to run the render_complete logic block).
       NS_EMAIL: ${{ secrets.NS_EMAIL }}
       NS_PASSWORD: ${{ secrets.NS_PASSWORD }}
+      # Clip art is opt-in: set the repo variable RENDER_ART to 1 to turn it on.
+      RENDER_ART: ${{ vars.RENDER_ART }}
     steps:
       - uses: actions/checkout@v5
 

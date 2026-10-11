@@ -2,7 +2,7 @@
 //   Chromium steps the /render page frame by frame -> ffmpeg (with the voiceover clips placed at each
 //   slide's start) -> upload -> render_complete.
 //
-//   node scripts/render/render.mjs --asset <exportasset id> [--dry-run --out file.mp4]
+//   node scripts/render/render.mjs --asset <exportasset id> [--dry-run --out file.mp4] [--debug] [--art]   (--debug burns timing info into the frames; --art adds clip art)
 //   node scripts/render/render.mjs --fixture [--res 1920x1080] [--fps 30] [--max-seconds 6]   (no login, no upload)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -48,6 +48,20 @@ const run = (cmd, args) =>
     p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}: ${err.slice(-400)}`))));
   });
 
+// Optional render-page switches: ?debug=1 burns timing info into frames, ?art=1 turns on clip art.
+function renderQuery({ debug, art }) {
+  const q = [debug ? "debug=1" : "", art ? "art=1" : ""].filter(Boolean).join("&");
+  return q ? `?${q}` : "";
+}
+
+// The director keeps or rejects every emphasis the storyboard proposes; log why, so a render is auditable.
+function printDecisions(decisions = []) {
+  if (decisions.length === 0) return console.log("Director: no emphasis proposals.");
+  const kept = decisions.filter((d) => d.status === "kept").length;
+  console.log(`Director: kept ${kept}, dropped ${decisions.length - kept} of ${decisions.length} proposals.`);
+  for (const d of decisions) console.log(`  ${d.status === "kept" ? "+" : "-"} ${d.scene} ${d.selector || d.id}: ${d.reason}`);
+}
+
 /** audioClips: [{ file, start }] with `start` in seconds from the beginning of the video. */
 async function renderVideo({ url, token, resolution, fps, audioClips, outFile, maxSeconds, onProgress = () => {} }) {
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage", "--force-color-profile=srgb"] });
@@ -71,7 +85,8 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
     page.on("pageerror", (e) => console.error("[page]", e.message));
     await page.goto(url);
     await page.waitForFunction(() => window.__render, null, { timeout: 60_000 });
-    await page.evaluate(() => window.__render.ready);
+    const scene = await page.evaluate(() => window.__render.ready);
+    printDecisions(scene.decisions);
 
     const duration = maxSeconds ? Math.min(info.duration, maxSeconds) : info.duration;
     const frames = Math.max(1, Math.round(duration * fps));
@@ -132,7 +147,7 @@ async function runFixture(args) {
   const { server, port } = await serveDist();
   try {
     const res = await renderVideo({
-      url: `http://localhost:${port}/render/fixture`,
+      url: `http://localhost:${port}/render/fixture${renderQuery(args)}`,
       resolution: args.res || "1920x1080",
       fps: Number(args.fps) || 30,
       maxSeconds: args["max-seconds"] ? Number(args["max-seconds"]) : undefined,
@@ -156,7 +171,7 @@ async function runFixture(args) {
 }
 
 // dryRun: render to `out` and stop — no upload, no status changes (the asset is only read).
-async function runAsset(assetId, { dryRun = false, out } = {}) {
+async function runAsset(assetId, { dryRun = false, out, debug = false, art = false } = {}) {
   const token = await login();
   const api = client(token);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "render-"));
@@ -198,7 +213,7 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
     const served = await serveDist();
     server = served.server;
     const result = await renderVideo({
-      url: `http://localhost:${served.port}/render/${projectId}`,
+      url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art })}`,
       token,
       resolution,
       fps,
@@ -233,7 +248,7 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.fixture) await runFixture(args);
-else if (args.asset) await runAsset(args.asset, { dryRun: Boolean(args["dry-run"]), out: typeof args.out === "string" ? args.out : undefined });
+else if (args.asset) await runAsset(args.asset, { dryRun: Boolean(args["dry-run"]), out: typeof args.out === "string" ? args.out : undefined, debug: Boolean(args.debug), art: Boolean(args.art) });
 else {
   console.error("Usage: render.mjs --asset <id> | --fixture [--res WxH] [--fps N] [--max-seconds N] [--out file]");
   process.exit(2);
