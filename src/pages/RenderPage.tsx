@@ -6,7 +6,7 @@ import {
   ActiveEffect, RenderData, SlideTiming, buildSlideTimings, cameraAt, cameraTransform, canvasSize,
   clamp, easeOut, slideStateAt
 } from "@/render/timeline";
-import { Decision, Intensity, Measured, PlannedEffect, PlannedReveal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
+import { Box, Decision, Intensity, Measured, PlannedEffect, PlannedReveal, Proposal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
 import { FIXTURE } from "@/render/fixture";
 import { ArtIndex, Rect, buildIndex, findArtSlot, insertArt, loadCatalog, occupiedBoxes, pickArt } from "@/render/art";
 
@@ -108,8 +108,20 @@ function measure(doc: Document, selector: string): Measured | null {
   if (!el) return null;
   const r = el.getBoundingClientRect();
   if (r.width <= 0 || r.height <= 0) return null;
-  const tokens = textNodes(el).flatMap((n) => (n.nodeValue ?? "").split(/\s+/).filter(Boolean));
-  return { box: { x: r.left, y: r.top, w: r.width, h: r.height }, tokens };
+  const tokens: string[] = [];
+  const wordBoxes: Box[] = [];
+  const range = doc.createRange();
+  for (const node of textNodes(el)) {
+    const text = node.nodeValue ?? "";
+    for (const m of text.matchAll(/\S+/g)) {
+      tokens.push(m[0]);
+      range.setStart(node, m.index ?? 0);
+      range.setEnd(node, (m.index ?? 0) + m[0].length);
+      const wr = range.getBoundingClientRect();
+      wordBoxes.push({ x: wr.left, y: wr.top, w: wr.width, h: wr.height });
+    }
+  }
+  return { box: { x: r.left, y: r.top, w: r.width, h: r.height }, tokens, wordBoxes };
 }
 
 /** Wrap every word of the element in a span (same order the director counted them). */
@@ -168,15 +180,17 @@ function applyEffect(layer: Layer, fx: ActiveEffect) {
   if (!el) return;
   const e = fx.envelope;
   const r = el.getBoundingClientRect();
-  const box = (pad: number) => `left:${r.left - pad}px;top:${r.top - pad}px;width:${r.width + pad * 2}px;height:${r.height + pad * 2}px;`;
   const grow = easeOut(fx.elapsed / 0.5);
+  // Drawn emphasis hugs the spoken words (one box per line); only if unknown does it fall back to the element.
+  const rects = fx.lines && fx.lines.length > 0 ? fx.lines.map((l) => ({ left: l.x, top: l.y, right: l.x + l.w, bottom: l.y + l.h, width: l.w, height: l.h })) : [r];
+  const boxOf = (q: { left: number; top: number; width: number; height: number }, pad: number) => `left:${q.left - pad}px;top:${q.top - pad}px;width:${q.width + pad * 2}px;height:${q.height + pad * 2}px;`;
 
   switch (fx.effect) {
     case "scale-pop":
       touch(layer, el);
       if (getComputedStyle(el).display === "inline") el.style.display = "inline-block";
       anchorToElement(el);
-      el.style.transform = `scale(${1 + 0.06 * Math.sin(Math.PI * clamp(fx.progress, 0, 1))})`;
+      el.style.transform = `scale(${1 + 0.1 * Math.sin(Math.PI * clamp(fx.progress, 0, 1))})`;
       break;
     case "glow":
       // drop-shadow follows the actual shape (letters or a card's outline), unlike a rectangular box-shadow.
@@ -184,13 +198,13 @@ function applyEffect(layer: Layer, fx: ActiveEffect) {
       el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${ACCENT},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${ACCENT},${0.55 * e}))`;
       break;
     case "underline":
-      overlay(doc, `left:${r.left}px;top:${r.bottom + 6}px;width:${r.width * grow}px;height:6px;border-radius:3px;background:rgb(${ACCENT});opacity:${e};z-index:999;`);
+      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom + 4}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${ACCENT});opacity:${e};z-index:999;`));
       break;
     case "circle":
-      overlay(doc, `${box(18)}border:5px solid rgb(${ACCENT});border-radius:50%;opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`);
+      rects.forEach((q) => overlay(doc, `${boxOf(q, 18)}border:5px solid rgb(${ACCENT});border-radius:${q.width > q.height * 3 ? "999px" : "50%"};opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
     case "wipe-reveal":
-      overlay(doc, `${box(8)}background:rgba(${ACCENT},${0.34 * e});border-radius:10px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`);
+      rects.forEach((q) => overlay(doc, `${boxOf(q, 6)}background:rgba(${ACCENT},${0.34 * e});border-radius:8px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
     default:
       break;
@@ -241,9 +255,17 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   if (!doc?.body) return;
   const slide = layer.timing.slide;
   const words = data.audio.find((a) => a.slide_id === slide.id)?.words ?? [];
-  const proposals = data.interactions
+  const proposals: Proposal[] = data.interactions
     .filter((i) => i.slide_id === slide.id)
     .map((i) => ({ id: i.id, selector: i.target_selector ?? "", text: i.target_text ?? "", action: i.action }));
+
+  // Every major block that is actually spoken is a candidate too, not just what the storyboard proposed,
+  // so the camera has real moments to move to. The director still drops anything not spoken.
+  const blocks = findBlocks(doc, width, height);
+  const proposed = new Set(proposals.map((p) => p.selector));
+  for (const el of blocks) {
+    if (!proposed.has(`#${el.id}`)) proposals.push({ id: `auto:${el.id}`, selector: `#${el.id}`, text: "", action: "auto" });
+  }
 
   // Clip art first, so the camera knows what has to stay in view.
   const artRects: Rect[] = [];
@@ -290,7 +312,6 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   }
 
   // Blocks of content arrive when the narrator reaches them (or with the scene if never mentioned).
-  const blocks = findBlocks(doc, width, height);
   const revealPlan = planReveals(
     blocks.map((el) => ({ selector: el.id, tokens: textNodes(el).flatMap((n) => (n.nodeValue ?? "").split(/\s+/).filter(Boolean)) })),
     words,
@@ -449,7 +470,7 @@ export default function RenderPage() {
         const layer = layers[state.index];
         if (!layer) return;
         const word = layer.words.find((w) => state.local >= w.s && state.local < w.e + 0.04);
-        const active = planEffectsAt(layer.plan.effects, state.local).map((f) => f.key.slice(-6));
+        const active = planEffectsAt(layer.plan.effects, state.local).map((f) => `${f.key.slice(-6)}:${f.effect}`);
         const cam = cameraAt(layer.plan.shots, state.local);
         hud.textContent =
           `t ${t.toFixed(2)}s   ${layer.timing.slide.name} +${state.local.toFixed(2)}s\n` +
