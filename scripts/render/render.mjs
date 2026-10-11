@@ -14,6 +14,10 @@ import { chromium } from "playwright";
 import { client, login } from "./lib.mjs";
 
 const DIST = path.resolve("dist");
+// The platform rejects uploads above the plan's limit (10 MB here); aim a little under it.
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 10 * 1024 * 1024;
+const TARGET_BYTES = Math.floor(MAX_UPLOAD_BYTES * 0.9);
+const AUDIO_KBPS = 96;
 // Default id of the get_voiceover_audio glyph; override with GLYPH_AUDIO_ID if it is ever recreated.
 const AUDIO_GLYPH_ID = process.env.GLYPH_AUDIO_ID || "e94f67d5-30a9-476e-b830-4849cb359083";
 const TOKEN_KEY = "cinecule.token";
@@ -100,8 +104,10 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
       filters.push(`${clips.map((_, i) => `[a${i}]`).join("")}amix=inputs=${clips.length}:normalize=0:duration=longest[aout]`);
     }
     args.push("-filter_complex", filters.join(";"), "-map", "[v]");
-    if (clips.length) args.push("-map", "[aout]", "-c:a", "aac", "-b:a", "192k");
-    args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", "18", "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
+    if (clips.length) args.push("-map", "[aout]", "-c:a", "aac", "-b:a", `${AUDIO_KBPS}k`);
+    // Quality-based, but capped so the file always fits the plan's upload limit (speech and flat graphics need far less than 1080p video usually gets).
+    const videoKbps = Math.max(250, Math.floor((TARGET_BYTES * 8) / 1000 / duration - AUDIO_KBPS));
+    args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", "20", "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
 
     const ff = spawn("ffmpeg", args, { stdio: ["pipe", "ignore", "pipe"] });
     let ffErr = "";
@@ -228,7 +234,17 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = fal
     }
 
     // Upload through the platform's presigned URL for exportasset.file_key.
-    const size = fs.statSync(outFile).size;
+    let size = fs.statSync(outFile).size;
+    if (size > MAX_UPLOAD_BYTES) {
+      // Still over the plan limit: re-encode the finished file at a lower video bitrate.
+      await report({ stage: "Compressing", pct: 93, eta: 40 });
+      const squeezed = outFile.replace(/\.mp4$/, "") + ".small.mp4";
+      const kbps = Math.max(200, Math.floor(((TARGET_BYTES * 8) / 1000 / result.duration - AUDIO_KBPS) * 0.9));
+      await run("ffmpeg", ["-y", "-loglevel", "error", "-i", outFile, "-c:a", "copy", "-c:v", "libx264", "-preset", "medium", "-b:v", `${kbps}k`, "-maxrate", `${kbps}k`, "-bufsize", `${kbps * 2}k`, "-movflags", "+faststart", squeezed]);
+      fs.renameSync(squeezed, outFile);
+      size = fs.statSync(outFile).size;
+      if (size > MAX_UPLOAD_BYTES) throw new Error(`Video is ${(size / 1e6).toFixed(1)} MB, over the ${(MAX_UPLOAD_BYTES / 1e6).toFixed(1)} MB upload limit even after compressing.`);
+    }
     await report({ stage: "Uploading", pct: 94, eta: 12 });
     const up = await api.get(`/uploadurl/exportasset/file_key?contentType=video/mp4&fileExtension=mp4&contentLength=${size}`);
     const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(outFile) });
