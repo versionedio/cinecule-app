@@ -75,7 +75,7 @@ export default function HomePage() {
         <div className="flex h-16 items-center justify-between px-4 md:px-16">
           <div className="flex items-center gap-2.5">
             <Clapperboard className="h-5 w-5 text-primary" />
-            <span className="font-display text-lg font-semibold tracking-tight">Cinematic Studio</span>
+            <span className="font-display text-lg font-semibold tracking-tight">Cinecule</span>
           </div>
           <div className="flex items-center gap-3">
             <ThemeToggle className="hidden sm:inline-flex" />
@@ -214,7 +214,7 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 sm:flex-row">
           <div className="flex items-center gap-2 text-sm text-muted">
             <Clapperboard className="h-4 w-4" />
-            Cinematic Studio
+            Cinecule
           </div>
           <p className="text-[11px] uppercase tracking-wide text-muted">the control room for the article-to-film pipeline</p>
         </div>

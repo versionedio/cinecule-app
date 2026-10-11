@@ -49,7 +49,7 @@ export default function AuthPage() {
   return (
     <div className="grid min-h-screen md:grid-cols-2">
       <div className="hidden flex-col justify-between overflow-hidden bg-[#191816] p-16 text-[#e8e4dc] md:flex">
-        <span className="font-display text-lg tracking-wide">Cinematic Studio</span>
+        <span className="font-display text-lg tracking-wide">Cinecule</span>
         <div>
           <p className="mb-6 text-[11px] uppercase tracking-widest text-[#c99b4e]">Reel one · sheet one</p>
           <h2 className="mb-4 max-w-[20ch] font-display text-5xl font-normal leading-[1.05] text-[#f2ede4]">
@@ -68,7 +68,7 @@ export default function AuthPage() {
           <Link to="/" className="mb-6 flex items-center gap-2.5 transition-opacity hover:opacity-80">
             <Clapperboard className="h-7 w-7 text-primary" />
             <div>
-              <h1 className="font-display text-xl font-semibold">Cinematic Studio</h1>
+              <h1 className="font-display text-xl font-semibold">Cinecule</h1>
               <p className="text-[11px] uppercase tracking-widest text-muted">article &rarr; 4K film, automatically</p>
             </div>
           </Link>
