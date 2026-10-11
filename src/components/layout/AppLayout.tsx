@@ -23,7 +23,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 px-5 py-5">
         <Clapperboard className="h-5 w-5 text-primary" />
-        <span className="font-display text-lg font-semibold leading-tight tracking-tight">Cinematic Studio</span>
+        <span className="font-display text-lg font-semibold leading-tight tracking-tight">Cinecule</span>
       </div>
       <div className="hr" />
       <nav className="flex-1 space-y-1 p-2.5">

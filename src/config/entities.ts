@@ -152,6 +152,13 @@ export interface ExportAsset {
   file_key?: string;
   cdn_url?: string;
   status: ExportAssetStatus;
+  resolution?: string;
+  frame_rate?: number;
+  duration_sec?: number;
+  // Reported by the render worker while the asset is "processing".
+  progress_pct?: number;
+  eta_sec?: number;
+  stage?: string;
   created_at?: string;
 }
 
@@ -179,7 +186,12 @@ export interface Interaction {
   name?: string;
   slide_id: string;
   project_id: string;
+  // The words the narration speaks for this emphasis — used to time it. Rows
+  // saved by the editor before target_selector existed hold a CSS selector here.
   target_text: string;
+  // "#id" of the slide element to emphasise (generated slides give every
+  // emphasised element an id). Preferred over target_text when locating it.
+  target_selector?: string;
   action: InteractionAction;
   trigger: "click" | "timed";
   time_offset: number;
@@ -188,6 +200,10 @@ export interface Interaction {
   sort_order?: number;
   created_at?: string;
 }
+
+/** The selector to try first for an interaction, covering rows from before target_selector existed. */
+export const interactionSelector = (i: Pick<Interaction, "target_selector" | "target_text">) =>
+  i.target_selector || i.target_text;
 
 export interface Voiceover {
   id: string;

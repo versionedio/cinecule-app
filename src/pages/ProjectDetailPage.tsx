@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Clapperboard, Play, RotateCcw } from "lucide-react";
 import { entityService } from "@/services/entityService";
+import { startPipeline } from "@/services/pipelineService";
 import { ENTITY_NAMES, ExportAsset, Project, STAGE_LOADING_MESSAGES } from "@/config/entities";
 import PipelineTimeline from "@/components/common/PipelineTimeline";
 import StatusChip from "@/components/common/StatusChip";
+import RenderProgress from "@/components/common/RenderProgress";
 import { entityMissing } from "@/components/common/EntityGate";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -66,9 +68,13 @@ function ChildTable({ entity, projectId, columns }: {
 export default function ProjectDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [project, setProject] = useState<Project | null>(null);
   const [videoAsset, setVideoAsset] = useState<ExportAsset | null>(null);
   const [error, setError] = useState("");
+  const [preparing, setPreparing] = useState(false);
+  const autoStarted = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   const load = () =>
     entityService
@@ -107,6 +113,37 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // Ingest runs per source and no longer advances the project, so wait for
+  // every source to finish (bounded by a timeout) before starting generation.
+  const beginPipeline = async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setError("");
+    setPreparing(true);
+    try {
+      await startPipeline(id, { signal: controller.signal });
+      await load();
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      setError(e instanceof Error ? e.message : "Couldn't start the pipeline.");
+    } finally {
+      if (abortRef.current === controller) setPreparing(false);
+    }
+  };
+
+  // Arriving from the new-project page: start automatically, once. Clearing
+  // the router state stops a page refresh from re-triggering it.
+  useEffect(() => {
+    const autoStart = (location.state as { autoStart?: boolean } | null)?.autoStart;
+    if (!autoStart || autoStarted.current || project?.status !== "draft") return;
+    autoStarted.current = true;
+    navigate(location.pathname, { replace: true, state: null });
+    beginPipeline();
+  }, [project?.status]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   if (!project) return <p className="text-muted">{error || "Loading…"}</p>;
 
   return (
@@ -116,9 +153,9 @@ export default function ProjectDetailPage() {
         <div className="flex items-center gap-2">
           <StatusChip status={project.status} />
           {project.status === "draft" && (
-            <Button onClick={() => setStatus("generating_content")}>
+            <Button onClick={beginPipeline} disabled={preparing}>
               <Play className="h-4 w-4" />
-              Start pipeline
+              {preparing ? "Preparing…" : "Start pipeline"}
             </Button>
           )}
           {project.status === "ready_to_render" && (
@@ -144,7 +181,20 @@ export default function ProjectDetailPage() {
 
       <PipelineTimeline status={project.status} />
 
-      {STAGE_LOADING_MESSAGES[project.status] && (
+      {preparing && project.status === "draft" && (
+        <div className="mt-3 flex items-center gap-2">
+          <Spinner />
+          <p className="text-sm text-muted">Reading your sources…</p>
+        </div>
+      )}
+
+      {project.status === "rendering" && (
+        <div className="mt-3">
+          <RenderProgress projectId={id} onFinished={load} />
+        </div>
+      )}
+
+      {project.status !== "rendering" && STAGE_LOADING_MESSAGES[project.status] && (
         <div className="mt-3 flex items-center gap-2">
           <Spinner />
           <p className="text-sm text-muted">{STAGE_LOADING_MESSAGES[project.status]}</p>

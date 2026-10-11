@@ -1,0 +1,52 @@
+{
+    "actionButtons": {
+        "loadNpmCommands": false,
+        "reloadButton": null,
+        "defaultColor": "#27ab39",
+        "commands": [
+            {
+                "name": "$(git-branch) New branch",
+                "singleInstance": true,
+                "tooltip": "Create a branch off dev (cinecule-app)",
+                "command": "bash .vscode/release.sh new-branch"
+            },
+            {
+                "name": "$(git-pull-request) PR\u2192dev",
+                "singleInstance": true,
+                "tooltip": "Commit + push + open PR \u2192 dev (cinecule-app)",
+                "command": "bash .vscode/release.sh pr-dev"
+            },
+            {
+                "name": "$(git-merge) Merge dev",
+                "singleInstance": true,
+                "tooltip": "Merge open PR into dev (cinecule-app)",
+                "command": "bash .vscode/release.sh merge-dev"
+            },
+            {
+                "name": "$(git-pull-request) PR\u2192stage",
+                "singleInstance": true,
+                "tooltip": "Open PR dev \u2192 stage (cinecule-app)",
+                "command": "bash .vscode/release.sh pr-stage"
+            },
+            {
+                "name": "$(git-merge) Merge stage",
+                "singleInstance": true,
+                "tooltip": "Merge open PR into stage \u2014 deploys test (cinecule-app)",
+                "command": "bash .vscode/release.sh merge-stage"
+            },
+            {
+                "name": "$(tag) Draft tag",
+                "singleInstance": true,
+                "tooltip": "Draft release tag off stage (cinecule-app)",
+                "command": "bash .vscode/release.sh draft-tag"
+            },
+            {
+                "name": "$(rocket) Publish\u2192prod",
+                "singleInstance": true,
+                "color": "#ff7b00",
+                "tooltip": "Publish tag \u2192 DEPLOY TO PROD (cinecule-app)",
+                "command": "bash .vscode/release.sh publish-tag"
+            }
+        ]
+    }
+}
