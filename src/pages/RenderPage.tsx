@@ -264,6 +264,7 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   const blocks = findBlocks(doc, width, height);
   const proposed = new Set(proposals.map((p) => p.selector));
   for (const el of blocks) {
+    if (el.id.endsWith("-art")) continue; // the empty slot reserved for clip art has nothing to say
     if (!proposed.has(`#${el.id}`)) proposals.push({ id: `auto:${el.id}`, selector: `#${el.id}`, text: "", action: "auto" });
   }
 
