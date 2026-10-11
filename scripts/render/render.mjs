@@ -49,7 +49,7 @@ const run = (cmd, args) =>
   });
 
 /** audioClips: [{ file, start }] with `start` in seconds from the beginning of the video. */
-async function renderVideo({ url, token, resolution, fps, audioClips, outFile, maxSeconds }) {
+async function renderVideo({ url, token, resolution, fps, audioClips, outFile, maxSeconds, onProgress = () => {} }) {
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage", "--force-color-profile=srgb"] });
   try {
     // Canvas size comes from the page, so open it once at a default size to learn it.
@@ -97,10 +97,19 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
     console.log(`Rendering ${frames} frames (${duration.toFixed(1)}s @ ${fps} fps) at ${resolution}, scale ${scale.toFixed(2)}.`);
     const started = Date.now();
     let lastLog = -1;
+    let lastReport = 0;
+    // Frames are 8-88% of the whole job; encoding and upload make up the rest. The tail estimate is
+    // deliberately generous so the countdown reaches zero a little late rather than hitting it early.
+    const TAIL_SEC = 30;
     for (let f = 0; f < frames; f++) {
       await page.evaluate((t) => window.__render.setTime(t), f / fps);
       const buf = await page.screenshot({ type: "jpeg", quality: 95, animations: "disabled" });
       if (!ff.stdin.write(buf)) await once(ff.stdin, "drain");
+      if (Date.now() - lastReport > 4000 && f > 0) {
+        lastReport = Date.now();
+        const perFrame = (Date.now() - started) / 1000 / f;
+        onProgress({ stage: "Rendering frames", pct: 8 + (f / frames) * 80, eta: Math.round((frames - f) * perFrame + TAIL_SEC) });
+      }
       const pct = Math.floor((f / frames) * 20) * 5;
       if (pct !== lastLog) {
         lastLog = pct;
@@ -108,6 +117,7 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
       }
     }
     ff.stdin.end();
+    onProgress({ stage: "Finishing video", pct: 90, eta: 25 });
     const code = await closed;
     if (code !== 0) throw new Error(`ffmpeg failed (${code}): ${ffErr.slice(-500)}`);
     return { duration, frames, info };
@@ -152,6 +162,15 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "render-"));
   const outFile = out ? path.resolve(out) : path.join(tmp, "video.mp4");
   const complete = (body) => api.post("/logicblocks/render_complete", { exportasset_id: assetId, ...body });
+  // Progress is best-effort: a failed update must never fail the render itself.
+  const report = async ({ stage, pct, eta }) => {
+    if (dryRun) return;
+    try {
+      await api.put(`/update/exportasset/${assetId}`, { stage, progress_pct: Math.round(Math.min(99, pct)), eta_sec: Math.max(0, Math.round(eta)) });
+    } catch (e) {
+      console.warn("progress update failed:", e.message);
+    }
+  };
   let server;
 
   try {
@@ -160,6 +179,7 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
     const resolution = asset.resolution || "1920x1080";
     const fps = Number(asset.frame_rate) || 30;
     console.log(`Asset ${assetId}: project ${projectId}, ${resolution} @ ${fps} fps`);
+    await report({ stage: "Preparing", pct: 3, eta: 120 });
 
     // Voiceover clips, fetched as base64 through the get_voiceover_audio glyph endpoint.
     const audios = await api.list("audio", { project_id: projectId, kind: "voiceover" });
@@ -173,6 +193,7 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
       clipFiles.set(a.slide_id, file);
     }
     console.log(`Fetched ${clipFiles.size} voiceover clip(s).`);
+    await report({ stage: "Starting the render", pct: 8, eta: 100 });
 
     const served = await serveDist();
     server = served.server;
@@ -182,6 +203,7 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
       resolution,
       fps,
       outFile,
+      onProgress: report,
       audioClips: (info) => info.slides.filter((s) => clipFiles.has(s.id)).map((s) => ({ file: clipFiles.get(s.id), start: s.start }))
     });
 
@@ -192,10 +214,11 @@ async function runAsset(assetId, { dryRun = false, out } = {}) {
 
     // Upload through the platform's presigned URL for exportasset.file_key.
     const size = fs.statSync(outFile).size;
+    await report({ stage: "Uploading", pct: 94, eta: 12 });
     const up = await api.get(`/uploadurl/exportasset/file_key?contentType=video/mp4&fileExtension=mp4&contentLength=${size}`);
     const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(outFile) });
     if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-    await api.put(`/update/exportasset/${assetId}`, { file_key: up.s3Key, cdn_url: up.cdnUrl });
+    await api.put(`/update/exportasset/${assetId}`, { file_key: up.s3Key, cdn_url: up.cdnUrl, stage: "Done", progress_pct: 100, eta_sec: 0 });
     await complete({ success: true, cdn_url: up.cdnUrl, duration_sec: Number(result.duration.toFixed(2)) });
     console.log(`Done: ${(size / 1e6).toFixed(1)} MB uploaded to ${up.s3Key}`);
   } catch (e) {

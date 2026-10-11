@@ -42,5 +42,23 @@ export const entityService = {
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
       .join("&");
     return api.get<ListResponse<T>>(`/list/${entity}${qs ? `?${qs}` : ""}`, undefined, signal);
+  },
+
+  /** Every record matching the filters, following the cursor (`nexttoken`) across pages. */
+  listAll: async <T>(
+    entity: string,
+    params: Record<string, string | number | boolean | undefined> = {},
+    signal?: AbortSignal,
+    maxPages = 20
+  ): Promise<T[]> => {
+    const all: T[] = [];
+    let token: string | null | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const res = await entityService.list<T>(entity, { pagesize: 500, ...params, nexttoken: token ?? undefined }, signal);
+      all.push(...(res.data ?? []));
+      token = res.nexttoken;
+      if (!token) break;
+    }
+    return all;
   }
 };

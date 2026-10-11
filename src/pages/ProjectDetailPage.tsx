@@ -6,6 +6,7 @@ import { startPipeline } from "@/services/pipelineService";
 import { ENTITY_NAMES, ExportAsset, Project, STAGE_LOADING_MESSAGES } from "@/config/entities";
 import PipelineTimeline from "@/components/common/PipelineTimeline";
 import StatusChip from "@/components/common/StatusChip";
+import RenderProgress from "@/components/common/RenderProgress";
 import { entityMissing } from "@/components/common/EntityGate";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -187,7 +188,13 @@ export default function ProjectDetailPage() {
         </div>
       )}
 
-      {STAGE_LOADING_MESSAGES[project.status] && (
+      {project.status === "rendering" && (
+        <div className="mt-3">
+          <RenderProgress projectId={id} onFinished={load} />
+        </div>
+      )}
+
+      {project.status !== "rendering" && STAGE_LOADING_MESSAGES[project.status] && (
         <div className="mt-3 flex items-center gap-2">
           <Spinner />
           <p className="text-sm text-muted">{STAGE_LOADING_MESSAGES[project.status]}</p>

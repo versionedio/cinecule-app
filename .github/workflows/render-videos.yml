@@ -1,13 +1,17 @@
 name: Render videos
 
-# Polls for queued renders (exportasset status "created", created when a project reaches
-# "rendering") and renders one per run. The poll itself is cheap: it only needs Node, so the
-# heavy install/build/render steps are skipped when nothing is queued.
+# Renders queued videos (exportasset status "created", created when a project reaches "rendering").
 #
-# Scheduled workflows only run from the default branch.
+# Triggers:
+#  - workflow_dispatch: the platform calls this through its GitHub connector the moment a render is
+#    queued, so rendering starts within about a minute and nothing polls in the meantime.
+#  - schedule (hourly): a safety net that picks up anything a missed dispatch left behind.
+#
+# The first step only needs Node, so the heavy install/build/render steps are skipped when nothing
+# is queued. Dispatch and scheduled triggers only work from the default branch.
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -58,6 +62,6 @@ jobs:
         if: steps.claim.outputs.has_work == 'true'
         run: npm run build
 
-      - name: Render
+      - name: Render (and drain the queue)
         if: steps.claim.outputs.has_work == 'true'
-        run: node scripts/render/render.mjs --asset "${{ steps.claim.outputs.asset_id }}"
+        run: node scripts/render/worker.mjs "${{ steps.claim.outputs.asset_id }}"

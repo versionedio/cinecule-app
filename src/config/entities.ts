@@ -152,6 +152,13 @@ export interface ExportAsset {
   file_key?: string;
   cdn_url?: string;
   status: ExportAssetStatus;
+  resolution?: string;
+  frame_rate?: number;
+  duration_sec?: number;
+  // Reported by the render worker while the asset is "processing".
+  progress_pct?: number;
+  eta_sec?: number;
+  stage?: string;
   created_at?: string;
 }
 
