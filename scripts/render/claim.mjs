@@ -1,5 +1,9 @@
-// Cheap poll step: is a render queued? If so, claim it (created -> processing) and report its id.
-// The workflow runs one job at a time (concurrency group), so claiming by status is race-free.
+// Finds queued renders and claims one (created -> processing).
+//   node scripts/render/claim.mjs       cheap poll step for the workflow: reports has_work / asset_id
+//   import { claimNext }                used by worker.mjs to keep going until the queue is empty
+//
+// Only one worker runs at a time (the workflow's concurrency group), so claiming by status is race-free.
+import { pathToFileURL } from "node:url";
 import { client, login, setOutput } from "./lib.mjs";
 
 // A render that was claimed but never finished (runner killed, job timed out) would stay
@@ -15,26 +19,36 @@ const createdMs = (a) => {
   return decoded > 1.5e12 && decoded < 4e12 ? decoded : NaN;
 };
 
-const api = client(await login());
-
-const stuck = await api.list("exportasset", { status: "processing", asset_type: "video" });
-for (const a of stuck) {
-  const age = Date.now() - createdMs(a);
-  if (Number.isNaN(age) || age < STALE_AFTER_MS) continue;
-  console.log(`Export asset ${a.id} has been processing for over 5h; marking it failed.`);
-  await api.post("/logicblocks/render_complete", { exportasset_id: a.id, success: false, error_message: "Render timed out before finishing." });
+export async function failStaleRenders(api) {
+  const stuck = await api.list("exportasset", { status: "processing", asset_type: "video" });
+  for (const a of stuck) {
+    const age = Date.now() - createdMs(a);
+    if (Number.isNaN(age) || age < STALE_AFTER_MS) continue;
+    console.log(`Export asset ${a.id} has been processing for over 5h; marking it failed.`);
+    await api.post("/logicblocks/render_complete", { exportasset_id: a.id, success: false, error_message: "Render timed out before finishing." });
+  }
 }
 
-const queued = await api.list("exportasset", { status: "created", asset_type: "video" });
-if (queued.length === 0) {
-  console.log("No queued renders.");
-  setOutput("has_work", "false");
-  process.exit(0);
+/** Oldest queued render, claimed as "processing"; null when the queue is empty. */
+export async function claimNext(api) {
+  const queued = await api.list("exportasset", { status: "created", asset_type: "video" });
+  if (queued.length === 0) return null;
+  queued.sort((a, b) => (createdMs(a) || 0) - (createdMs(b) || 0));
+  const asset = queued[0];
+  await api.put(`/update/exportasset/${asset.id}`, { status: "processing", stage: "Starting", progress_pct: 1, eta_sec: 150 });
+  console.log(`Claimed export asset ${asset.id} for project ${asset.project_id} (${asset.resolution} @ ${asset.frame_rate} fps).`);
+  return asset;
 }
 
-queued.sort((a, b) => (createdMs(a) || 0) - (createdMs(b) || 0));
-const asset = queued[0];
-await api.put(`/update/exportasset/${asset.id}`, { status: "processing" });
-console.log(`Claimed export asset ${asset.id} for project ${asset.project_id} (${asset.resolution} @ ${asset.frame_rate} fps).`);
-setOutput("has_work", "true");
-setOutput("asset_id", asset.id);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const api = client(await login());
+  await failStaleRenders(api);
+  const asset = await claimNext(api);
+  if (!asset) {
+    console.log("No queued renders.");
+    setOutput("has_work", "false");
+  } else {
+    setOutput("has_work", "true");
+    setOutput("asset_id", asset.id);
+  }
+}
