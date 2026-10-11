@@ -8,7 +8,7 @@ import {
 } from "@/render/timeline";
 import { Box, Decision, Intensity, Measured, PlannedEffect, PlannedReveal, Proposal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
 import { FIXTURE } from "@/render/fixture";
-import { ArtIndex, Rect, buildIndex, findArtSlot, insertArt, loadCatalog, occupiedBoxes, pickArt } from "@/render/art";
+import { ArtIndex, buildIndex, findArtSlots, insertArt, loadCatalog, pickArt, resolveSubject } from "@/render/art";
 
 /**
  * Headless video render surface. Not a user-facing page: the render script opens it in Chromium,
@@ -77,7 +77,9 @@ interface Layer {
   // Blocks of content that arrive when the narrator reaches them.
   reveals: { el: HTMLElement; plan: PlannedReveal }[];
   // Clip art, placed in free space and arriving with the word it illustrates.
-  arts: { el: HTMLElement; start: number }[];
+  arts: { el: HTMLElement; start: number; shapes: SVGElement[] }[];
+  // A picture scene: one big icon drawn on, no text.
+  hero: boolean;
   // Inline styles of elements an effect touched, so each frame starts clean.
   original: Map<HTMLElement, string | null>;
   // The words of each read-along target, wrapped in spans so they can be lit one at a time.
@@ -246,11 +248,11 @@ function buildLayer(host: HTMLElement, timing: SlideTiming, index: number, width
   ambient.appendChild(camera);
   root.appendChild(ambient);
   host.appendChild(root);
-  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], original: new Map(), followSpans: new Map() };
+  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], hero: false, original: new Map(), followSpans: new Map() };
 }
 
 /** Once a slide has loaded, let the director decide what really happens in it. */
-function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null, usedArt: Set<string>) {
+function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null) {
   const doc = layer.frame.contentDocument;
   if (!doc?.body) return;
   const slide = layer.timing.slide;
@@ -268,30 +270,34 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
     if (!proposed.has(`#${el.id}`)) proposals.push({ id: `auto:${el.id}`, selector: `#${el.id}`, text: "", action: "auto" });
   }
 
-  // Clip art first, so the camera knows what has to stay in view.
-  const artRects: Rect[] = [];
+  // Picture scenes: the storyboard names one or two icons (data-art="dog,bone"); they are drawn large,
+  // evenly sized and centred, and nothing else is on screen.
   const artDecisions: Decision[] = [];
-  // Clip art: only for words actually spoken, only where it covers nothing.
-  if (art && words.length > 0) {
-    const occupied: Rect[] = occupiedBoxes(doc);
-    let n = 0;
-    for (const pick of pickArt(art, words, { exclude: usedArt })) {
-      const slot = findArtSlot(doc, { width, height }, occupied);
-      const id = `art:${pick.name}`;
-      if (!slot) {
-        artDecisions.push({ id, selector: "", status: "dropped", reason: `"${pick.word}" has art but there is no free space for it` });
-        continue;
-      }
-      if (slot.reserved && n > 0) break; // one reserved slot holds one piece
-      const el = insertArt(doc, art, pick, slot.rect, n++);
-      usedArt.add(pick.name); // each piece of art appears once per video, so the choices stay varied
-      occupied.push(slot.rect);
-      artRects.push(slot.rect);
-      layer.arts.push({ el, start: pick.start });
-      artDecisions.push({ id, selector: "", status: "kept", reason: `"${pick.word}" at ${pick.start.toFixed(1)}s -> ${pick.name}${slot.reserved ? " (reserved slot)" : ""}` });
+  const heroEl = doc.querySelector<HTMLElement>("[data-art]");
+  if (heroEl) {
+    layer.hero = true;
+    const subject = heroEl.getAttribute("data-art") ?? "";
+    const names: string[] = [];
+    for (const part of subject.split(",")) {
+      const name = art ? resolveSubject(art, part) : null;
+      if (name && !names.includes(name)) names.push(name);
+      else if (part.trim()) artDecisions.push({ id: `art:${part.trim()}`, selector: "", status: "dropped", reason: `"${part.trim()}" is not an icon in the library` });
     }
-  } else if (art && words.length === 0) {
-    artDecisions.push({ id: "art", selector: "", status: "dropped", reason: "no word timings, so no art" });
+    if (art && names.length === 0) {
+      const literal = pickArt(art, words, { max: 1 })[0]?.name;
+      if (literal) names.push(literal);
+    }
+    const rects = findArtSlots(doc, names.length);
+    if (art && rects.length > 0) {
+      rects.forEach((rect, i) => {
+        const start = 0.3 + i * 0.7;
+        const el = insertArt(doc, art, { name: names[i], word: subject, start, score: 10 }, rect, i);
+        layer.arts.push({ el, start, shapes: Array.from(el.querySelectorAll<SVGElement>("path,line,polyline,polygon,circle,rect,ellipse")) });
+        artDecisions.push({ id: `art:${names[i]}`, selector: "", status: "kept", reason: `picture scene icon ${i + 1} of ${rects.length}: ${names[i]}` });
+      });
+    } else {
+      artDecisions.push({ id: "art", selector: "", status: "dropped", reason: `picture scene has no usable icon for "${subject}"` });
+    }
   }
 
   layer.plan = planScene({
@@ -300,8 +306,7 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
     words,
     proposals,
     measure: (selector) => measure(doc, selector),
-    intensity: (data.project.director_camera_intensity ?? "medium") as Intensity,
-    keepVisible: artRects
+    intensity: (data.project.director_camera_intensity ?? "medium") as Intensity
   });
   layer.plan.decisions.push(...artDecisions);
 
@@ -332,7 +337,7 @@ function findBlocks(doc: Document, width: number, height: number): HTMLElement[]
   const visit = (parent: Element) => {
     for (const child of Array.from(parent.children)) {
       const el = child as HTMLElement;
-      if (el.id.startsWith("__")) continue; // the effects layer and clip art manage themselves
+      if (el.id.startsWith("__") || el.hasAttribute("data-art")) continue; // the effects layer and clip art manage themselves
       if (el.id) {
         const r = el.getBoundingClientRect();
         const big = (r.width * r.height) / (width * height) > 0.7;
@@ -354,20 +359,25 @@ function poseLayer(layer: Layer, local: number, width: number, height: number) {
   // stay inside the slide's padding, so it can never crop content.
   const total = Math.max(1, layer.timing.end - layer.timing.start);
   const p = clamp(local / total, 0, 1);
-  const dir = layer.index % 2 === 0 ? 1 : -1;
-  const scale = dir > 0 ? 1 + 0.04 * p : 1.04 - 0.04 * p;
+  const dir = layer.hero || layer.index % 2 === 0 ? 1 : -1;
+  const amp = layer.hero ? 0.09 : 0.04; // a picture scene has nothing to crop, so it can push in further
+  const scale = dir > 0 ? 1 + amp * p : 1 + amp - amp * p;
   const glideX = (layer.index % 3 === 0 ? -1 : 1) * 0.012 * width * (p - 0.5);
   const glideY = (layer.index % 2 === 0 ? 1 : -1) * 0.006 * height * (p - 0.5);
   layer.ambient.style.transform = `translate(${glideX.toFixed(2)}px, ${glideY.toFixed(2)}px) scale(${scale.toFixed(4)})`;
 
   resetEffects(layer);
-  // Clip art: arrives with its word, then idles gently so it feels alive but never distracting.
-  for (const { el, start } of layer.arts) {
-    const prog = revealProgress({ selector: "", start: Math.max(0.15, start - 0.35), duration: 0.7, synced: true }, local);
+  // Picture: the icon is drawn on stroke by stroke, then idles gently.
+  for (const { el, start, shapes } of layer.arts) {
+    const draw = easeOut(clamp((local - start) / 1.6, 0, 1));
+    for (const shape of shapes) {
+      shape.style.strokeDasharray = "1 1";
+      shape.style.strokeDashoffset = String((1 - draw).toFixed(4));
+    }
     const bob = Math.sin((local / 3.2) * Math.PI * 2) * 5;
     const tilt = Math.sin((local / 4.1) * Math.PI * 2) * 1.5;
-    el.style.opacity = String(prog);
-    el.style.transform = `translateY(${(bob + (1 - prog) * 40).toFixed(1)}px) rotate(${tilt.toFixed(2)}deg) scale(${(0.8 + 0.2 * prog).toFixed(3)})`;
+    el.style.opacity = draw > 0.01 ? "1" : "0";
+    el.style.transform = `translateY(${bob.toFixed(1)}px) rotate(${tilt.toFixed(2)}deg) scale(${(0.94 + 0.06 * draw).toFixed(3)})`;
   }
   // Arrivals first: an element is hidden and lowered until its moment, then settles into place.
   for (const { el, plan } of layer.reveals) {
@@ -405,8 +415,8 @@ export default function RenderPage() {
   const [error, setError] = useState("");
   const scrub = params.get("scrub") === "1";
   const debug = params.get("debug") === "1";
-  // Clip art is opt-in (?art=1) until it is switched on for production renders.
-  const artOn = params.get("art") === "1";
+  // Picture scenes need the icon library; ?art=0 turns it off.
+  const artOn = params.get("art") !== "0";
   const [duration, setDuration] = useState(0);
   const setTimeRef = useRef<(t: number) => void>(() => undefined);
 
@@ -435,8 +445,7 @@ export default function RenderPage() {
       } catch {
         /* no art library available: scenes simply render without clip art */
       }
-      const usedArt = new Set<string>();
-      layers.forEach((l) => planLayer(l, data, width, height, art, usedArt));
+      layers.forEach((l) => planLayer(l, data, width, height, art));
 
       const setTime = (t: number) => {
         const state = slideStateAt(timings, t);
