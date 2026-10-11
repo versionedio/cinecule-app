@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Trash2 } from "lucide-react";
-import { Interaction, InteractionAction } from "@/config/entities";
+import { Interaction, InteractionAction, interactionSelector } from "@/config/entities";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -23,7 +23,7 @@ export function InteractionInspector({
 }: {
   focusedSelector: string | null;
   interaction: Interaction | null;
-  onSave: (data: Partial<Interaction> & { target_text: string }) => void;
+  onSave: (data: Partial<Interaction>) => void;
   onDelete: (id: string) => void;
   onFocus: (selector: string | null) => void;
   slideInteractions: Interaction[];
@@ -78,7 +78,17 @@ export function InteractionInspector({
               <Button
                 size="sm"
                 onClick={() =>
-                  onSave({ id: interaction?.id, target_text: focusedSelector, action, trigger, time_offset: timeOffset, duration, label })
+                  onSave({
+                    id: interaction?.id,
+                    // An existing interaction keeps the words it was timed against; only new ones take the selector as text.
+                    ...(interaction ? {} : { target_text: focusedSelector }),
+                    target_selector: focusedSelector,
+                    action,
+                    trigger,
+                    time_offset: timeOffset,
+                    duration,
+                    label
+                  })
                 }
               >
                 {interaction ? "Save" : "Create interaction"}
@@ -103,7 +113,7 @@ export function InteractionInspector({
         {slideInteractions.map((i) => (
           <button
             key={i.id}
-            onClick={() => onFocus(i.target_text)}
+            onClick={() => onFocus(interactionSelector(i))}
             className="flex items-center justify-between rounded-[3px] px-2 py-1.5 text-left text-sm hover:bg-surface-raised"
           >
             <span className="truncate">{i.label || i.target_text}</span>

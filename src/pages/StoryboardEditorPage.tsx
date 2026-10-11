@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { entityService } from "@/services/entityService";
 import {
   CameraShot, CanvasAspectRatio, CursorSpeed, CursorTimelinePoint,
-  ENTITY_NAMES, GeneratedHtml, Interaction, Project, VideoEffectCue
+  ENTITY_NAMES, GeneratedHtml, Interaction, Project, VideoEffectCue, interactionSelector
 } from "@/config/entities";
 import { CanvasFrame } from "@/components/storyboard/CanvasFrame";
 import { SlidePreview } from "@/components/storyboard/SlidePreview";
@@ -76,7 +76,7 @@ export default function StoryboardEditorPage() {
   const slideInteractions = interactions.filter((i) => i.slide_id === activeSlideId);
   const slideCameraShots = cameraShots.filter((s) => s.slide_id === activeSlideId);
   const slideEffectCues = effectCues.filter((c) => c.slide_id === activeSlideId);
-  const focusedInteraction = slideInteractions.find((i) => i.target_text === focusedSelector) ?? null;
+  const focusedInteraction = slideInteractions.find((i) => interactionSelector(i) === focusedSelector) ?? null;
 
   const updateProjectField = async (patch: Partial<Project>) => {
     if (!project) return;
@@ -124,7 +124,7 @@ export default function StoryboardEditorPage() {
   };
 
   // --- Interactions ---
-  const saveInteraction = async (data: Partial<Interaction> & { target_text: string }) => {
+  const saveInteraction = async (data: Partial<Interaction>) => {
     if (!activeSlideId) return;
     if (data.id) {
       const updated = await entityService.update<Interaction>(ENTITY_NAMES.interaction, data.id, data);
@@ -134,7 +134,7 @@ export default function StoryboardEditorPage() {
         ...data, project_id: id, slide_id: activeSlideId
       });
       setInteractions((prev) => [...prev, created]);
-      setFocusedSelector(created.target_text);
+      setFocusedSelector(interactionSelector(created));
     }
   };
 

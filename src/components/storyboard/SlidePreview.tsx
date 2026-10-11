@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { GeneratedHtml, Interaction } from "@/config/entities";
+import { GeneratedHtml, Interaction, interactionSelector } from "@/config/entities";
 
 /**
  * Sandboxed-iframe slide preview — the port's stand-in for storyboard-
@@ -31,6 +31,30 @@ const IFRAME_STYLE = `
   .sb-dim-rest { opacity: .35; }
   .sb-focused { outline: 2px dashed #c99b4e !important; outline-offset: 2px; cursor: pointer; }
 `;
+
+// A selector that isn't valid CSS (for example plain words saved before
+// target_selector existed) must not throw and take the whole preview with it.
+function safeQuery(doc: Document, selector: string | undefined | null): Element | null {
+  if (!selector) return null;
+  try {
+    return doc.querySelector(selector);
+  } catch {
+    return null;
+  }
+}
+
+// Last resort when an interaction has no usable selector: the smallest element
+// whose text contains the words it was written for.
+function findByText(doc: Document, text: string | undefined): Element | null {
+  const needle = (text || "").trim().toLowerCase();
+  if (!needle) return null;
+  let best: Element | null = null;
+  doc.body.querySelectorAll("*").forEach((el) => {
+    if (!el.textContent?.toLowerCase().includes(needle)) return;
+    if (!best || el.textContent.length < (best.textContent?.length ?? Infinity)) best = el;
+  });
+  return best;
+}
 
 function selectorPath(el: Element, root: Element): string {
   if (el.id) return `#${el.id}`;
@@ -79,7 +103,7 @@ export function SlidePreview({
       if (!doc?.body) return;
 
       for (const inter of interactions) {
-        const el = doc.querySelector(inter.target_text);
+        const el = safeQuery(doc, interactionSelector(inter)) ?? findByText(doc, inter.target_text);
         if (!el) continue;
         const cls = EFFECT_CLASS[inter.action];
         el.classList.remove(...Object.values(EFFECT_CLASS));
@@ -88,8 +112,7 @@ export function SlidePreview({
 
       doc.querySelectorAll(".sb-focused").forEach((el) => el.classList.remove("sb-focused"));
       if (focusedSelector) {
-        const el = doc.querySelector(focusedSelector);
-        el?.classList.add("sb-focused");
+        safeQuery(doc, focusedSelector)?.classList.add("sb-focused");
       }
 
       if (selectionMode) {
