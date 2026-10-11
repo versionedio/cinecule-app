@@ -124,4 +124,6 @@ export interface ActiveEffect {
   progress: number; // 0..1 across the cue
   envelope: number; // 0..1 fade in/out
   elapsed: number;
+  /** Where to draw a highlight: just the spoken words, one box per line. */
+  lines?: { x: number; y: number; w: number; h: number }[];
 }

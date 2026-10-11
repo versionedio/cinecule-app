@@ -21,6 +21,8 @@ export interface Measured {
   box: Box;
   /** Visible text of the element, in reading order, one entry per word. */
   tokens: string[];
+  /** Box of each word in `tokens` (same order), so an emphasis can hug just the words that are spoken. */
+  wordBoxes?: Box[];
 }
 export interface Proposal {
   id: string;
@@ -61,6 +63,8 @@ export interface PlannedEffect {
   end: number;
   /** Per on-screen word timing, only for "follow". */
   follow?: FollowToken[];
+  /** One box per line of the spoken words: the emphasis is drawn on these, never on the whole element. */
+  lines?: Box[];
 }
 
 export interface Decision {
@@ -82,8 +86,9 @@ export const RULES = {
   END_REST: 0.7, // the camera is back at rest this long before the scene ends (transition clears)
   MIN_ZOOM_GAP: 2.2, // cool-down between the end of one zoom and the start of the next
   MIN_FX_GAP: 0.4, // calm between two highlights: one thing moves at a time
-  MAX_ZOOMS: 3, // camera focus moves per scene
-  MAX_FX: 4, // emphasised things per scene
+  MAX_ZOOMS: 4, // camera focus moves per scene
+  MAX_FX: 5, // emphasised things per scene
+  MAX_FOLLOW: 1, // read-along is a feature moment, not the default look
   MIN_ZOOM: 1.12, // below this a zoom is invisible, so skip it
   ZOOM_CAP: { subtle: 1.18, medium: 1.35, dramatic: 1.55 } as Record<Intensity, number>,
   MAX_ZOOM_AREA: 0.4, // never zoom into something already filling >40% of the frame
@@ -92,7 +97,7 @@ export const RULES = {
   HOLD_AFTER: 0.45, // and lingers just after it
   MATCH_MIN: 0.5, // share of a target's content words that must be spoken together
   MAX_SPAN: 6.0, // a spoken phrase longer than this is not one "moment"
-  FOLLOW_MIN_TOKENS: 3 // read-along only for text of at least this many matched words
+  FOLLOW_MIN_TOKENS: 5 // read-along only for text of at least this many matched words
 };
 
 const STOP = new Set(["the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for", "is", "are", "was", "were", "it", "its", "with", "as", "by", "that", "this", "from", "be", "has", "have", "had", "up"]);
@@ -191,7 +196,7 @@ export function planEffectsAt(effects: PlannedEffect[], t: number): ActiveEffect
       const elapsed = t - fx.start;
       const duration = fx.end - fx.start;
       const envelope = easeOut(clamp(Math.min(elapsed / FADE_IN, (duration - elapsed) / FADE_OUT), 0, 1));
-      return { key: fx.key, effect: fx.effect, selector: fx.selector, progress: elapsed / duration, envelope, elapsed };
+      return { key: fx.key, effect: fx.effect, selector: fx.selector, progress: elapsed / duration, envelope, elapsed, lines: fx.lines };
     });
 }
 
@@ -238,6 +243,38 @@ export function revealProgress(r: PlannedReveal, t: number): number {
   return easeOut(clamp((t - r.start) / r.duration, 0, 1));
 }
 
+const ROTATION: EffectType[] = ["underline", "wipe-reveal", "circle", "glow", "scale-pop"];
+// What the storyboard asked for is respected only when it names a specific look; the generic
+// "highlight" it writes almost every time would otherwise make every scene the same.
+const SPECIFIC = new Set(["glow-green", "glow-orange", "scale-pop", "draw-outline"]);
+
+/** Boxes of the on-screen words that are actually spoken, merged into one box per line. */
+function spokenLines(m: Measured, words: WordTiming[], match: Match): Box[] {
+  if (!m.wordBoxes || m.wordBoxes.length !== m.tokens.length) return [];
+  const spoken = new Set(match.matched.map((j) => keyOf(words[j].w)));
+  const idx = m.tokens.map((t, i) => (spoken.has(keyOf(t)) ? i : -1)).filter((i) => i >= 0);
+  if (idx.length === 0) return [];
+  const boxes = m.wordBoxes.slice(idx[0], idx[idx.length - 1] + 1);
+  const lines: Box[] = [];
+  for (const b of boxes) {
+    const line = lines.find((l) => Math.abs(l.y + l.h / 2 - (b.y + b.h / 2)) < Math.min(l.h, b.h) * 0.5);
+    if (!line) { lines.push({ ...b }); continue; }
+    const x2 = Math.max(line.x + line.w, b.x + b.w);
+    const y2 = Math.max(line.y + line.h, b.y + b.h);
+    line.x = Math.min(line.x, b.x);
+    line.y = Math.min(line.y, b.y);
+    line.w = x2 - line.x;
+    line.h = y2 - line.y;
+  }
+  return lines;
+}
+
+const unionBox = (boxes: Box[]): Box => {
+  const x = Math.min(...boxes.map((b) => b.x));
+  const y = Math.min(...boxes.map((b) => b.y));
+  return { x, y, w: Math.max(...boxes.map((b) => b.x + b.w)) - x, h: Math.max(...boxes.map((b) => b.y + b.h)) - y };
+};
+
 export function planScene(input: DirectorInput): ScenePlan {
   const { duration, canvas, words, proposals, measure, intensity, keepVisible = [] } = input;
   const decisions: Decision[] = [];
@@ -250,7 +287,7 @@ export function planScene(input: DirectorInput): ScenePlan {
   }
 
   // 1. VALIDATE: the target must exist, and what it shows must actually be said.
-  interface Candidate { p: Proposal; m: Measured; match: Match; start: number; end: number; area: number; score: number }
+  interface Candidate { p: Proposal; m: Measured; match: Match; start: number; end: number; area: number; score: number; lines: Box[]; focus: Box }
   const candidates: Candidate[] = [];
   for (const p of proposals) {
     const m = p.selector ? measure(p.selector) : null;
@@ -263,22 +300,25 @@ export function planScene(input: DirectorInput): ScenePlan {
     const last = words[match.last];
     const start = first.s;
     const end = Math.min(last.e, start + RULES.MAX_SPAN);
-    candidates.push({ p, m, match, start, end, area: (m.box.w * m.box.h) / (canvas.width * canvas.height), score: match.score });
+    const lines = spokenLines(m, words, match);
+    const focus = lines.length > 0 ? unionBox(lines) : m.box;
+    candidates.push({ p, m, match, start, end, area: (focus.w * focus.h) / (canvas.width * canvas.height), score: match.score, lines, focus });
   }
   candidates.sort((a, b) => a.start - b.start);
 
   // 2. SEQUENCE: one thing at a time, in the order it is spoken, with calm between.
   const kept: (Candidate & { fxStart: number; fxEnd: number })[] = [];
-  let lastEnd = 0;
-  for (const c of candidates) {
+  // The storyboard's own proposals get first pick of the timeline; auto-picked blocks fill what is left.
+  const byPriority = candidates.slice().sort((x, y) => Number(y.p.action !== "auto") - Number(x.p.action !== "auto") || x.start - y.start);
+  for (const c of byPriority) {
     if (kept.length >= RULES.MAX_FX) { drop(c.p, `more than ${RULES.MAX_FX} emphasised things in one scene`); continue; }
     const fxStart = Math.max(0.4, c.start - RULES.LEAD);
     const fxEnd = Math.min(restEnd, Math.max(c.end + RULES.HOLD_AFTER, fxStart + 1.2));
     if (fxEnd - fxStart < 0.8) { drop(c.p, "no room before the scene ends"); continue; }
-    if (kept.length > 0 && fxStart < lastEnd + RULES.MIN_FX_GAP) { drop(c.p, "too close to the previous emphasis"); continue; }
+    if (kept.some((k) => fxStart < k.fxEnd + RULES.MIN_FX_GAP && k.fxStart < fxEnd + RULES.MIN_FX_GAP)) { drop(c.p, "too close to another emphasis"); continue; }
     kept.push({ ...c, fxStart, fxEnd });
-    lastEnd = fxEnd;
   }
+  kept.sort((x, y) => x.start - y.start);
 
   // 3. CAMERA: calm, slow, tied to speech, with a cool-down so it never pumps in and out.
   const spanSec = Math.max(1, words[words.length - 1].e - words[0].s);
@@ -292,27 +332,40 @@ export function planScene(input: DirectorInput): ScenePlan {
   let zoomRestAt = -Infinity; // when the previous zoom finished returning to wide
   let holdEnd = -Infinity; // when the current focus is released
   let focusOpen = false;
+  let followLeft: number = RULES.MAX_FOLLOW;
+  let rotation = 0;
+  let lastLook: EffectType | null = null;
+  const longest = kept.slice().sort((a, b) => b.m.tokens.length - a.m.tokens.length)[0];
 
   kept.forEach((c, i) => {
     const text = c.m.tokens.length;
-    const wantsFollow = text >= RULES.FOLLOW_MIN_TOKENS && c.match.matched.length >= RULES.FOLLOW_MIN_TOKENS;
+    // Read-along only once per scene, for the longest sentence; everything else gets a distinct, short emphasis.
+    const wantsFollow = followLeft > 0 && c === longest && text >= RULES.FOLLOW_MIN_TOKENS && c.match.matched.length >= RULES.FOLLOW_MIN_TOKENS;
     const follow = wantsFollow ? buildFollow(c.m.tokens, words, c.match.first, Math.min(words.length - 1, c.match.last + 2)) : null;
+    if (follow) followLeft--;
+    let look: EffectType = CALM_EFFECT[c.p.action] ?? "glow";
+    if (!SPECIFIC.has(String(c.p.action))) {
+      const spokenText = c.lines.length > 0 ? c.m.tokens.join(" ") : c.p.text;
+      look = /\d/.test(spokenText) && c.focus.w < canvas.width * 0.5 ? "circle" : ROTATION[rotation++ % ROTATION.length];
+      if (look === lastLook) look = ROTATION[rotation++ % ROTATION.length];
+    }
+    lastLook = look;
     const effect: PlannedEffect = follow
       ? { key: c.p.id, kind: "follow", effect: "none", selector: c.p.selector, start: Math.max(0.4, follow[0].s - RULES.LEAD), end: Math.min(restEnd, follow[follow.length - 1].e + 0.7), follow }
-      : { key: c.p.id, kind: "highlight", effect: CALM_EFFECT[c.p.action] ?? "glow", selector: c.p.selector, start: c.fxStart, end: c.fxEnd };
+      : { key: c.p.id, kind: "highlight", effect: look, selector: c.p.selector, start: c.fxStart, end: c.fxEnd, lines: c.lines };
     effects.push(effect);
 
     // Zoom only when it helps: a small enough target, a visible zoom, room to arrive and leave.
     // The camera frames the target together with anything that must stay visible (clip art),
     // and never zooms further than that framing allows.
-    const boxes = [c.m.box, ...keepVisible];
+    const boxes = [c.focus, ...keepVisible];
     const left = Math.min(...boxes.map((b) => b.x));
     const top = Math.min(...boxes.map((b) => b.y));
     const right = Math.max(...boxes.map((b) => b.x + b.w));
     const bottom = Math.max(...boxes.map((b) => b.y + b.h));
     const cx = (((left + right) / 2) / canvas.width) * 100;
     const cy = (((top + bottom) / 2) / canvas.height) * 100;
-    const fitTarget = Math.min(canvas.width / (c.m.box.w * RULES.FIT_MARGIN), canvas.height / (c.m.box.h * RULES.FIT_MARGIN));
+    const fitTarget = Math.min(canvas.width / (c.focus.w * RULES.FIT_MARGIN), canvas.height / (c.focus.h * RULES.FIT_MARGIN));
     const fitAll = Math.min(canvas.width / ((right - left) * 1.08), canvas.height / ((bottom - top) * 1.08));
     const zoom = Math.round(Math.min(cap, fitTarget, fitAll) * 100) / 100;
     const zStart = Math.max(RULES.SETTLE, effect.start - zoomIn * 0.85);
