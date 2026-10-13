@@ -176,6 +176,26 @@ async function runFixture(args) {
   }
 }
 
+/**
+ * Uploads the video as free-form content and publishes it, returning a public URL that works on any
+ * domain. The response shapes are read defensively, and what came back is printed if a step is missing,
+ * so a mismatch is obvious in the run log.
+ */
+async function uploadPublicVideo(api, file, size, name) {
+  const qs = new URLSearchParams({ contentType: "video/mp4", fileExtension: "mp4", contentLength: String(size), filename: name, name }).toString();
+  const up = await api.get(`/content/uploadurl?${qs}`);
+  const uploadUrl = up?.uploadUrl ?? up?.url;
+  if (!uploadUrl) throw new Error(`content/uploadurl returned no upload address (got keys: ${Object.keys(up ?? {}).join(", ") || "none"})`);
+  const put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(file) });
+  if (!put.ok) throw new Error(`content upload failed (${put.status})`);
+  const contentId = up?.contentId ?? up?.id ?? up?.content?.id;
+  if (!contentId) throw new Error(`content/uploadurl returned no content id (got keys: ${Object.keys(up ?? {}).join(", ")})`);
+  const pub = await api.post(`/content/${contentId}/publish`);
+  const publicUrl = pub?.publicUrl;
+  if (!publicUrl) throw new Error(`publish returned no public link (got keys: ${Object.keys(pub ?? {}).join(", ") || "none"})`);
+  return publicUrl;
+}
+
 // dryRun: render to `out` and stop — no upload, no status changes (the asset is only read).
 async function runAsset(assetId, { dryRun = false, out, debug = false, art = true } = {}) {
   const token = await login();
@@ -246,12 +266,25 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
       if (size > MAX_UPLOAD_BYTES) throw new Error(`Video is ${(size / 1e6).toFixed(1)} MB, over the ${(MAX_UPLOAD_BYTES / 1e6).toFixed(1)} MB upload limit even after compressing.`);
     }
     await report({ stage: "Uploading", pct: 94, eta: 12 });
-    const up = await api.get(`/uploadurl/exportasset/file_key?contentType=video/mp4&fileExtension=mp4&contentLength=${size}`);
-    const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(outFile) });
-    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-    await api.put(`/update/exportasset/${assetId}`, { file_key: up.s3Key, cdn_url: up.cdnUrl, stage: "Done", progress_pct: 100, eta_sec: 0 });
-    await complete({ success: true, cdn_url: up.cdnUrl, duration_sec: Number(result.duration.toFixed(2)) });
-    console.log(`Done: ${(size / 1e6).toFixed(1)} MB uploaded to ${up.s3Key}`);
+    // A video must play on any device. Files in an entity file field are private and need cookies that
+    // other devices (Safari, Firefox, phones) block, so the video goes up as published content with a
+    // public link. If that path fails for any reason, fall back to the private upload so a render never fails here.
+    let videoUrl;
+    let fileKey;
+    try {
+      videoUrl = await uploadPublicVideo(api, outFile, size, `video-${assetId}.mp4`);
+      console.log(`Published publicly: ${videoUrl}`);
+    } catch (e) {
+      console.warn(`Public upload failed (${e?.message || e}); falling back to the private upload. The video will only play in browsers signed in to nostackai.`);
+      const up = await api.get(`/uploadurl/exportasset/file_key?contentType=video/mp4&fileExtension=mp4&contentLength=${size}`);
+      const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(outFile) });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      videoUrl = up.cdnUrl;
+      fileKey = up.s3Key;
+    }
+    await api.put(`/update/exportasset/${assetId}`, { ...(fileKey ? { file_key: fileKey } : {}), cdn_url: videoUrl, stage: "Done", progress_pct: 100, eta_sec: 0 });
+    await complete({ success: true, cdn_url: videoUrl, duration_sec: Number(result.duration.toFixed(2)) });
+    console.log(`Done: ${(size / 1e6).toFixed(1)} MB at ${videoUrl}`);
   } catch (e) {
     console.error("Render failed:", e);
     if (!dryRun) await complete({ success: false, error_message: String(e?.message || e).slice(0, 400) }).catch((err) => console.error("Could not report failure:", err.message));
