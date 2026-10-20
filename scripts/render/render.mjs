@@ -12,12 +12,14 @@ import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
 import { client, login } from "./lib.mjs";
+import { generateSceneImages } from "./images.mjs";
 
 const DIST = path.resolve("dist");
-// The platform rejects uploads above the plan's limit (10 MB here); aim a little under it.
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 10 * 1024 * 1024;
+// There is no upload limit on the current plan, so videos are encoded for quality, not size.
+// Set MAX_UPLOAD_BYTES (e.g. 10485760) to bring the size cap back if a plan ever has one again.
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 0;
 const TARGET_BYTES = Math.floor(MAX_UPLOAD_BYTES * 0.9);
-const AUDIO_KBPS = 96;
+const AUDIO_KBPS = MAX_UPLOAD_BYTES ? 96 : 160;
 // Default id of the get_voiceover_audio glyph; override with GLYPH_AUDIO_ID if it is ever recreated.
 const AUDIO_GLYPH_ID = process.env.GLYPH_AUDIO_ID || "e94f67d5-30a9-476e-b830-4849cb359083";
 const TOKEN_KEY = "cinecule.token";
@@ -32,10 +34,17 @@ function parseArgs(argv) {
   return out;
 }
 
-function serveDist() {
+function serveDist(genDir) {
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".woff2": "font/woff2" };
   const server = http.createServer((req, res) => {
     const pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+    // Generated pictures live outside dist, in a per-render folder.
+    if (genDir && pathname.startsWith("/__gen/")) {
+      const gen = path.join(genDir, path.basename(pathname));
+      if (!fs.existsSync(gen)) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { "Content-Type": types[path.extname(gen)] || (path.extname(gen) === ".jpg" ? "image/jpeg" : path.extname(gen) === ".webp" ? "image/webp" : "application/octet-stream") });
+      return fs.createReadStream(gen).pipe(res);
+    }
     let file = path.join(DIST, pathname);
     if (!file.startsWith(DIST) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(DIST, "index.html");
     res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" });
@@ -105,9 +114,9 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
     }
     args.push("-filter_complex", filters.join(";"), "-map", "[v]");
     if (clips.length) args.push("-map", "[aout]", "-c:a", "aac", "-b:a", `${AUDIO_KBPS}k`);
-    // Quality-based, but capped so the file always fits the plan's upload limit (speech and flat graphics need far less than 1080p video usually gets).
-    const videoKbps = Math.max(250, Math.floor((TARGET_BYTES * 8) / 1000 / duration - AUDIO_KBPS));
-    args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", "20", "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
+    // Quality-based. Only when a size cap is configured is the video bitrate limited to fit it.
+    const cap = MAX_UPLOAD_BYTES ? (() => { const kbps = Math.max(250, Math.floor((TARGET_BYTES * 8) / 1000 / duration - AUDIO_KBPS)); return ["-maxrate", `${kbps}k`, "-bufsize", `${kbps * 2}k`]; })() : [];
+    args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", MAX_UPLOAD_BYTES ? "20" : "18", ...cap, "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
 
     const ff = spawn("ffmpeg", args, { stdio: ["pipe", "ignore", "pipe"] });
     let ffErr = "";
@@ -150,7 +159,15 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
 async function runFixture(args) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "render-fixture-"));
   const outFile = path.resolve(args.out || "render-fixture.mp4");
-  const { server, port } = await serveDist();
+  // --photo <file> stands in for a generated picture on the fixture's picture scene (no image key needed).
+  const genDir = path.join(tmp, "gen");
+  if (args.photo && typeof args.photo === "string") {
+    fs.mkdirSync(genDir, { recursive: true });
+    const name = `slp${path.extname(args.photo) || ".png"}`;
+    fs.copyFileSync(args.photo, path.join(genDir, name));
+    fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify({ slp: `/__gen/${name}` }));
+  }
+  const { server, port } = await serveDist(genDir);
   try {
     const res = await renderVideo({
       url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"] })}`,
@@ -234,9 +251,16 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
       clipFiles.set(a.slide_id, file);
     }
     console.log(`Fetched ${clipFiles.size} voiceover clip(s).`);
+
+    // Real pictures for picture scenes (skipped, with icons as the fallback, when no image key is set: GEMINI_API_KEY or ELEVENLABS_IMAGE_KEY).
+    await report({ stage: "Creating pictures", pct: 5, eta: 110 });
+    const genDir = path.join(tmp, "gen");
+    const slides = await api.list("generatedhtml", { project_id: projectId });
+    const photos = await generateSceneImages({ slides, dir: genDir });
+    if (Object.keys(photos).length > 0) fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify(photos));
     await report({ stage: "Starting the render", pct: 8, eta: 100 });
 
-    const served = await serveDist();
+    const served = await serveDist(genDir);
     server = served.server;
     const result = await renderVideo({
       url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art })}`,
@@ -255,7 +279,7 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
 
     // Upload through the platform's presigned URL for exportasset.file_key.
     let size = fs.statSync(outFile).size;
-    if (size > MAX_UPLOAD_BYTES) {
+    if (MAX_UPLOAD_BYTES && size > MAX_UPLOAD_BYTES) {
       // Still over the plan limit: re-encode the finished file at a lower video bitrate.
       await report({ stage: "Compressing", pct: 93, eta: 40 });
       const squeezed = outFile.replace(/\.mp4$/, "") + ".small.mp4";
