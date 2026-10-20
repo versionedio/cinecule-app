@@ -7,7 +7,8 @@ import {
   clamp, easeOut, slideStateAt
 } from "@/render/timeline";
 import { Box, Decision, Intensity, Measured, PlannedEffect, PlannedReveal, Proposal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
-import { FIXTURE } from "@/render/fixture";
+import { FIXTURE, fixtureThemed } from "@/render/fixture";
+import { themeHead } from "@/render/theme";
 import { ArtIndex, buildIndex, findArtSlots, insertArt, loadCatalog, pickArt, resolveSubject } from "@/render/art";
 
 /**
@@ -34,6 +35,7 @@ declare global {
   }
 }
 
+// The accent of older, self-styled slides; themed slides supply their own (--accent-rgb).
 const ACCENT = "242,181,74";
 // Slide HTML may carry its own CSS animation; freeze it so a frame depends only on `t`.
 const FREEZE_CSS = "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}html,body{margin:0;height:100%;overflow:hidden}";
@@ -90,6 +92,8 @@ interface Layer {
   reveals: { el: HTMLElement; plan: PlannedReveal }[];
   // Clip art, placed in free space and arriving with the word it illustrates.
   arts: { el: HTMLElement; start: number; shapes: SVGElement[]; photo?: boolean }[];
+  // The slide's accent colour as "r,g,b", so highlights and icons match its theme.
+  accent: string;
   // The generated picture of a picture scene, so its loading can be awaited before any frame is drawn.
   photoImg?: HTMLImageElement;
   // A picture scene: one big icon drawn on, no text.
@@ -211,16 +215,16 @@ function applyEffect(layer: Layer, fx: ActiveEffect) {
     case "glow":
       // drop-shadow follows the actual shape (letters or a card's outline), unlike a rectangular box-shadow.
       touch(layer, el);
-      el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${ACCENT},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${ACCENT},${0.55 * e}))`;
+      el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${layer.accent},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${layer.accent},${0.55 * e}))`;
       break;
     case "underline":
-      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom + 4}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${ACCENT});opacity:${e};z-index:999;`));
+      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom + 4}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${layer.accent});opacity:${e};z-index:999;`));
       break;
     case "circle":
-      rects.forEach((q) => overlay(doc, `${boxOf(q, 18)}border:5px solid rgb(${ACCENT});border-radius:${q.width > q.height * 3 ? "999px" : "50%"};opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
+      rects.forEach((q) => overlay(doc, `${boxOf(q, 18)}border:5px solid rgb(${layer.accent});border-radius:${q.width > q.height * 3 ? "999px" : "50%"};opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
     case "wipe-reveal":
-      rects.forEach((q) => overlay(doc, `${boxOf(q, 6)}background:rgba(${ACCENT},${0.34 * e});border-radius:8px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
+      rects.forEach((q) => overlay(doc, `${boxOf(q, 6)}background:rgba(${layer.accent},${0.34 * e});border-radius:8px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
     default:
       break;
@@ -236,9 +240,9 @@ function applyFollow(layer: Layer, planned: PlannedEffect, fx: ActiveEffect, loc
     const span = spans[tok.index];
     if (!span) continue;
     if (local >= tok.s && local < tok.e) {
-      span.style.cssText = `background:rgba(${ACCENT},${0.55 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${ACCENT},${0.55 * e});`;
+      span.style.cssText = `background:rgba(${layer.accent},${0.55 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${layer.accent},${0.55 * e});`;
     } else if (local >= tok.e) {
-      span.style.cssText = `background:rgba(${ACCENT},${0.2 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${ACCENT},${0.2 * e});`;
+      span.style.cssText = `background:rgba(${layer.accent},${0.2 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${layer.accent},${0.2 * e});`;
     }
   }
 }
@@ -257,12 +261,12 @@ function buildLayer(host: HTMLElement, timing: SlideTiming, index: number, width
   // Listen before srcdoc is set: a fresh iframe's blank document already reads "complete", so
   // readyState can't be trusted, and a late listener could miss the real load.
   const loaded = new Promise<void>((resolve) => frame.addEventListener("load", () => resolve(), { once: true }));
-  frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.tailwindcss.com"></script><style>${FREEZE_CSS}</style></head><body>${timing.slide.html_content || ""}<div id="__fx"></div></body></html>`;
+  frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.tailwindcss.com"></script><style>${FREEZE_CSS}</style>${themeHead(timing.slide.html_content || "")}</head><body>${timing.slide.html_content || ""}<div id="__fx"></div></body></html>`;
   camera.appendChild(frame);
   ambient.appendChild(camera);
   root.appendChild(ambient);
   host.appendChild(root);
-  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], hero: false, original: new Map(), followSpans: new Map() };
+  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], hero: false, accent: ACCENT, original: new Map(), followSpans: new Map() };
 }
 
 /** Once a slide has loaded, let the director decide what really happens in it. */
@@ -270,6 +274,9 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   const doc = layer.frame.contentDocument;
   if (!doc?.body) return;
   const slide = layer.timing.slide;
+  const themed = doc.querySelector("[data-theme]");
+  const themeAccent = themed ? getComputedStyle(themed).getPropertyValue("--accent-rgb").trim() : "";
+  if (themeAccent) layer.accent = themeAccent;
   const words = data.audio.find((a) => a.slide_id === slide.id)?.words ?? [];
   const proposals: Proposal[] = data.interactions
     .filter((i) => i.slide_id === slide.id)
@@ -317,7 +324,7 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
     if (art && rects.length > 0) {
       rects.forEach((rect, i) => {
         const start = 0.3 + i * 0.7;
-        const el = insertArt(doc, art, { name: names[i], word: subject, start, score: 10 }, rect, i);
+        const el = insertArt(doc, art, { name: names[i], word: subject, start, score: 10 }, rect, i, layer.accent);
         layer.arts.push({ el, start, shapes: Array.from(el.querySelectorAll<SVGElement>("path,line,polyline,polygon,circle,rect,ellipse")) });
         artDecisions.push({ id: `art:${names[i]}`, selector: "", status: "kept", reason: `picture scene icon ${i + 1} of ${rects.length}: ${names[i]}` });
       });
@@ -457,7 +464,7 @@ export default function RenderPage() {
     let cancelled = false;
 
     const ready = (async (): Promise<RenderInfo> => {
-      const data: RenderData = { ...(id === "fixture" ? FIXTURE : await loadData(id)), photos: await loadPhotos() };
+      const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient") : FIXTURE) : await loadData(id)), photos: await loadPhotos() };
       const { width, height } = canvasSize(data.project);
       const { timings, duration: total } = buildSlideTimings(data.slides);
       if (timings.length === 0) throw new Error("This project has no slides to render.");

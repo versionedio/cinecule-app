@@ -3,7 +3,7 @@
 //   slide's start) -> upload -> render_complete.
 //
 //   node scripts/render/render.mjs --asset <exportasset id> [--dry-run --out file.mp4] [--debug] [--no-art]   (--debug burns timing info into the frames; --no-art turns off picture-scene icons)
-//   node scripts/render/render.mjs --fixture [--res 1920x1080] [--fps 30] [--max-seconds 6]   (no login, no upload)
+//   node scripts/render/render.mjs --fixture [--theme forest --bg glow] [--res 1920x1080] [--fps 30] [--max-seconds 6]   (no login, no upload; --theme shows the themed layouts)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
@@ -71,8 +71,8 @@ const run = (cmd, args) =>
   });
 
 // Optional render-page switches: ?debug=1 burns timing info into frames, ?art=0 turns off picture-scene icons.
-function renderQuery({ debug, art }) {
-  const q = [debug ? "debug=1" : "", art ? "" : "art=0"].filter(Boolean).join("&");
+function renderQuery({ debug, art, theme, bg }) {
+  const q = [debug ? "debug=1" : "", art ? "" : "art=0", theme ? `theme=${encodeURIComponent(theme)}` : "", theme && bg ? `bg=${encodeURIComponent(bg)}` : ""].filter(Boolean).join("&");
   return q ? `?${q}` : "";
 }
 
@@ -179,7 +179,7 @@ async function runFixture(args) {
   const { server, port } = await serveDist(genDir);
   try {
     const res = await renderVideo({
-      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"] })}`,
+      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"], theme: typeof args.theme === "string" ? args.theme : undefined, bg: typeof args.bg === "string" ? args.bg : undefined })}`,
       resolution: args.res || "1920x1080",
       fps: Number(args.fps) || 30,
       maxSeconds: args["max-seconds"] ? Number(args["max-seconds"]) : undefined,
