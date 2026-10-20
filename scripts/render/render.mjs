@@ -20,6 +20,15 @@ const DIST = path.resolve("dist");
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 0;
 const TARGET_BYTES = Math.floor(MAX_UPLOAD_BYTES * 0.9);
 const AUDIO_KBPS = MAX_UPLOAD_BYTES ? 96 : 160;
+// Time estimates, from real GitHub runs: a 1080p, 30 fps frame takes about 0.07 s to draw and capture
+// (3036 frames took about 213 s). Keep these in step with src/components/common/RenderProgress.tsx.
+const PER_FRAME_SEC = 0.07;
+const FINISH_SEC = 60; // closing the encoder, then uploading and publishing the video
+const PICTURES_SEC = 60; // generating pictures for picture scenes (they run in parallel)
+const frameSeconds = (frames, resolution) => {
+  const [w, h] = String(resolution).split("x").map(Number);
+  return frames * PER_FRAME_SEC * (w > 0 && h > 0 ? (w * h) / (1920 * 1080) : 1);
+};
 // Default id of the get_voiceover_audio glyph; override with GLYPH_AUDIO_ID if it is ever recreated.
 const AUDIO_GLYPH_ID = process.env.GLYPH_AUDIO_ID || "e94f67d5-30a9-476e-b830-4849cb359083";
 const TOKEN_KEY = "cinecule.token";
@@ -237,7 +246,14 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
     const resolution = asset.resolution || "1920x1080";
     const fps = Number(asset.frame_rate) || 30;
     console.log(`Asset ${assetId}: project ${projectId}, ${resolution} @ ${fps} fps`);
-    await report({ stage: "Preparing", pct: 3, eta: 120 });
+    // How long this film should take from here, so the countdown starts at a realistic number instead of a guess.
+    const slides = await api.list("generatedhtml", { project_id: projectId });
+    const videoSec = slides.reduce((t, sl) => t + (Number(sl.duration) || 0), 0);
+    const framesSec = frameSeconds(videoSec * fps, resolution);
+    const hasPictures = slides.some((sl) => /data-art\s*=\s*["']/.test(String(sl.html_content ?? "")));
+    const picturesSec = hasPictures ? PICTURES_SEC : 0;
+    const remaining = () => Math.round(framesSec + picturesSec + FINISH_SEC);
+    await report({ stage: "Preparing", pct: 3, eta: remaining() + 15 });
 
     // Voiceover clips, fetched as base64 through the get_voiceover_audio glyph endpoint.
     const audios = await api.list("audio", { project_id: projectId, kind: "voiceover" });
@@ -253,12 +269,11 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
     console.log(`Fetched ${clipFiles.size} voiceover clip(s).`);
 
     // Real pictures for picture scenes (skipped, with icons as the fallback, when no image key is set: GEMINI_API_KEY or ELEVENLABS_IMAGE_KEY).
-    await report({ stage: "Creating pictures", pct: 5, eta: 110 });
+    await report({ stage: hasPictures ? "Creating pictures" : "Preparing", pct: 5, eta: remaining() });
     const genDir = path.join(tmp, "gen");
-    const slides = await api.list("generatedhtml", { project_id: projectId });
     const photos = await generateSceneImages({ slides, dir: genDir });
     if (Object.keys(photos).length > 0) fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify(photos));
-    await report({ stage: "Starting the render", pct: 8, eta: 100 });
+    await report({ stage: "Starting the render", pct: 8, eta: Math.round(framesSec + FINISH_SEC) });
 
     const served = await serveDist(genDir);
     server = served.server;
