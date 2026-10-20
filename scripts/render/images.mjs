@@ -38,12 +38,36 @@ export function pictureScenes(slides, style) {
     const described = attr(html, "data-image");
     const subject = subjects.join(" and ");
     const prompt = described || `A beautiful photograph of ${/^[aeiou]/i.test(subject) ? "an" : "a"} ${subject}`;
-    scenes.push({ slideId: slide.id, subjects, prompt: `${prompt}. ${style}` });
+    scenes.push({
+      slideId: slide.id,
+      subjects,
+      narration: String(slide.narration_text ?? "").trim(),
+      described: Boolean(described), // the storyboard already gave an exact description; keep it
+      basePrompt: prompt,
+      prompt: `${prompt}. ${style}`
+    });
   }
   return scenes;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** fetch with a timeout, retrying the temporary failures (overloaded or unavailable: 500, 502, 503, 504). */
+async function fetchRetry(url, init, { tries = 4, timeoutMs = 90_000 } = {}) {
+  let last;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (![500, 502, 503, 504].includes(res.status) || attempt === tries) return res;
+      last = new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      last = e;
+      if (attempt === tries) throw e;
+    }
+    await sleep(2000 * attempt); // 2 s, 4 s, 6 s
+  }
+  throw last;
+}
 
 async function createGeneration(apiKey, body) {
   const res = await fetch(API, { method: "POST", headers: { "xi-api-key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -91,11 +115,11 @@ async function generateWithGemini({ apiKey, prompt, outBase, model, resolution, 
   const base = baseUrl || "https://generativelanguage.googleapis.com/v1beta";
   // imageSize (1K/2K/4K) exists on the Gemini 3 image models only.
   const imageConfig = { aspectRatio, ...(resolution && !/^gemini-2\.5/.test(model) ? { imageSize: resolution } : {}) };
-  const res = await fetch(`${base}/models/${model}:generateContent`, {
+  const res = await fetchRetry(`${base}/models/${model}:generateContent`, {
     method: "POST",
     headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ["IMAGE"], imageConfig } })
-  });
+  }, { timeoutMs: 120_000 });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`gemini ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 240)}`);
   const parts = (json.candidates ?? []).flatMap((c) => c.content?.parts ?? []);
@@ -123,6 +147,36 @@ export async function generateImage({ provider, prompt, outBase, aspectRatio = "
   return provider.name === "gemini" ? generateWithGemini(args) : generateWithElevenLabs(args);
 }
 
+const DESCRIBE_INSTRUCTIONS = `You write the image prompt for ONE scene of a narrated video. The picture appears on screen while the narrator says the scene's narration, so it must clearly relate to what is being said at that moment.
+
+How to choose what to show:
+- If the narration is about something concrete (an animal, place, object, person doing something), show that thing itself, literally.
+- If the narration is abstract (a process, idea, feature, feeling, lesson), show a clear, concrete real-world scene or visual metaphor that stands for the idea, not a literal picture of the words. Pick ONE strong subject.
+- Judge by THIS scene's narration, not the film's overall topic. Do not show something that is only mentioned in passing.
+
+Write the prompt as a single photograph: the subject, setting, lighting and mood. Keep the subject centred with some empty space around it, wide 16:9 framing, uncluttered.
+Never include text, letters, numbers, logos, screenshots, charts or user interfaces, and no recognisable real people.
+Under 60 words. Reply with ONLY the prompt.`;
+
+/** An image prompt written for one scene by a text model that reads the scene's own narration. */
+export async function describeScene({ apiKey, baseUrl, model, filmOutline, narration }) {
+  const base = baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+  const res = await fetchRetry(`${base}/models/${model}:generateContent`, {
+    method: "POST",
+    headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: DESCRIBE_INSTRUCTIONS }] },
+      contents: [{ parts: [{ text: `The whole film, scene by scene (for context only):\n${filmOutline}\n\nTHIS scene's narration:\n"${narration}"\n\nWrite the image prompt for this scene.` }] }],
+      generationConfig: { temperature: 0.6, maxOutputTokens: 1024 }
+    })
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`describe ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 200)}`);
+  const text = (json.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim().replace(/^["'`]+|["'`]+$/g, "");
+  if (text.length < 15) throw new Error("describe returned no usable prompt");
+  return text;
+}
+
 /**
  * One image per picture scene, in parallel. Returns { slideId: "/__gen/<file>" } for the scenes that worked.
  * Settings come from the environment: IMAGE_PROVIDER, IMAGE_MODEL, IMAGE_RESOLUTION, IMAGE_QUALITY, IMAGE_STYLE.
@@ -144,10 +198,25 @@ export async function generateSceneImages({ slides, dir, log = console, env = pr
   log.log(`Generating ${scenes.length} picture(s) with ${provider.name} (${provider.model}).`);
   fs.mkdirSync(dir, { recursive: true });
   const photos = {};
+
+  // A text model reads each scene's own narration and writes the picture description, so what is shown
+  // matches what is said. Needs a Gemini key; without one (or if it fails) the plain subject prompt is used.
+  const geminiKey = env.GEMINI_API_KEY;
+  const describeModel = env.DESCRIBE_MODEL || "gemini-flash-latest";
+  const filmOutline = slides.map((sl, i) => `${i + 1}. ${String(sl.narration_text ?? "").trim().slice(0, 220)}`).filter((l) => l.length > 4).join("\n");
   await Promise.all(
     scenes.map(async (scene) => {
       try {
-        const file = await generateImage({ provider, prompt: scene.prompt, outBase: path.join(dir, scene.slideId) });
+        let prompt = scene.prompt;
+        if (!scene.described && geminiKey && scene.narration) {
+          try {
+            prompt = `${await describeScene({ apiKey: geminiKey, baseUrl: env.GEMINI_BASE_URL, model: describeModel, filmOutline, narration: scene.narration })} ${style}`;
+          } catch (e) {
+            log.warn(`Could not write a description for ${scene.slideId}; using the plain subject. ${e?.message || e}`);
+          }
+        }
+        log.log(`Prompt for ${scene.slideId} (${scene.subjects.join(", ")}): ${prompt}`);
+        const file = await generateImage({ provider, prompt, outBase: path.join(dir, scene.slideId) });
         photos[scene.slideId] = `/__gen/${path.basename(file)}`;
         log.log(`Picture for ${scene.slideId} (${scene.subjects.join(", ")}): ${path.basename(file)}`);
       } catch (e) {

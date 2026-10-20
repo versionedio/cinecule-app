@@ -349,6 +349,8 @@ export function planScene(input: DirectorInput): ScenePlan {
       look = /\d/.test(spokenText) && c.focus.w < canvas.width * 0.5 ? "circle" : ROTATION[rotation++ % ROTATION.length];
       if (look === lastLook) look = ROTATION[rotation++ % ROTATION.length];
     }
+    // A circle around text that wraps onto several lines draws overlapping pills; underline it instead.
+    if (look === "circle" && c.lines.length > 1) look = "underline";
     lastLook = look;
     const effect: PlannedEffect = follow
       ? { key: c.p.id, kind: "follow", effect: "none", selector: c.p.selector, start: Math.max(0.4, follow[0].s - RULES.LEAD), end: Math.min(restEnd, follow[follow.length - 1].e + 0.7), follow }

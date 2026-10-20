@@ -147,7 +147,7 @@ export function findArtSlots(doc: Document, count: number): Rect[] {
 const ACCENT = "242,181,74";
 
 /** Insert the icon, hand-drawn looking, into the slide. Returns the element so it can be revealed. */
-export function insertArt(doc: Document, index: ArtIndex, pick: ArtPick, rect: Rect, n: number): HTMLElement {
+export function insertArt(doc: Document, index: ArtIndex, pick: ArtPick, rect: Rect, n: number, accent: string = ACCENT): HTMLElement {
   if (!doc.getElementById("__wobble-defs")) {
     const defs = doc.createElement("div");
     defs.id = "__wobble-defs";
@@ -160,7 +160,7 @@ export function insertArt(doc: Document, index: ArtIndex, pick: ArtPick, rect: R
   const wrap = doc.createElement("div");
   wrap.id = `__art-${n}`;
   wrap.setAttribute("style", `position:absolute;left:${rect.x}px;top:${rect.y}px;width:${rect.w}px;height:${rect.h}px;pointer-events:none;`);
-  wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${rect.w}" height="${rect.h}" fill="none" stroke="rgb(${ACCENT})" stroke-width="${rect.w > 400 ? 1.1 : 1.5}" stroke-linecap="round" stroke-linejoin="round" style="filter:url(#__wobble)">${index.catalog[pick.name].b}</svg>`;
+  wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${rect.w}" height="${rect.h}" fill="none" stroke="rgb(${accent})" stroke-width="${rect.w > 400 ? 1.1 : 1.5}" stroke-linecap="round" stroke-linejoin="round" style="filter:url(#__wobble)">${index.catalog[pick.name].b}</svg>`;
   // Every stroke is normalised to length 1 so the renderer can draw it on by sliding one dash offset.
   wrap.querySelectorAll("path,line,polyline,polygon,circle,rect,ellipse").forEach((el) => el.setAttribute("pathLength", "1"));
   doc.body.appendChild(wrap);
