@@ -47,6 +47,18 @@ function parseWords(json: unknown): WordTiming[] {
   }
 }
 
+/** Pictures the render script generated for this render, if any. Anywhere else the request just fails. */
+async function loadPhotos(): Promise<Record<string, string>> {
+  try {
+    const res = await fetch("/__gen/photos.json");
+    if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return {};
+    const json = await res.json();
+    return json && typeof json === "object" ? (json as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
 async function loadData(projectId: string): Promise<RenderData> {
   const q = { project_id: projectId, pagesize: 100 };
   const [project, slides, interactions, audio] = await Promise.all([
@@ -77,7 +89,9 @@ interface Layer {
   // Blocks of content that arrive when the narrator reaches them.
   reveals: { el: HTMLElement; plan: PlannedReveal }[];
   // Clip art, placed in free space and arriving with the word it illustrates.
-  arts: { el: HTMLElement; start: number; shapes: SVGElement[] }[];
+  arts: { el: HTMLElement; start: number; shapes: SVGElement[]; photo?: boolean }[];
+  // The generated picture of a picture scene, so its loading can be awaited before any frame is drawn.
+  photoImg?: HTMLImageElement;
   // A picture scene: one big icon drawn on, no text.
   hero: boolean;
   // Inline styles of elements an effect touched, so each frame starts clean.
@@ -274,7 +288,19 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   // evenly sized and centred, and nothing else is on screen.
   const artDecisions: Decision[] = [];
   const heroEl = doc.querySelector<HTMLElement>("[data-art]");
-  if (heroEl) {
+  const photoUrl = data.photos?.[slide.id];
+  if (heroEl && photoUrl) {
+    // A real picture, full frame, replaces the icons.
+    layer.hero = true;
+    const img = doc.createElement("img");
+    img.id = "__art-photo";
+    img.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;opacity:0;pointer-events:none;");
+    img.src = photoUrl;
+    doc.body.appendChild(img);
+    layer.photoImg = img;
+    layer.arts.push({ el: img, start: 0.2, shapes: [], photo: true });
+    artDecisions.push({ id: "art:photo", selector: "", status: "kept", reason: `picture scene shows a generated picture (${photoUrl})` });
+  } else if (heroEl) {
     layer.hero = true;
     const subject = heroEl.getAttribute("data-art") ?? "";
     const names: string[] = [];
@@ -368,7 +394,12 @@ function poseLayer(layer: Layer, local: number, width: number, height: number) {
 
   resetEffects(layer);
   // Picture: the icon is drawn on stroke by stroke, then idles gently.
-  for (const { el, start, shapes } of layer.arts) {
+  for (const { el, start, shapes, photo } of layer.arts) {
+    if (photo) {
+      // A picture fades in and then holds still; the slow push of the whole scene gives it life.
+      el.style.opacity = easeOut(clamp((local - start) / 1.0, 0, 1)).toFixed(3);
+      continue;
+    }
     const draw = easeOut(clamp((local - start) / 1.6, 0, 1));
     for (const shape of shapes) {
       shape.style.strokeDasharray = "1 1";
@@ -426,7 +457,7 @@ export default function RenderPage() {
     let cancelled = false;
 
     const ready = (async (): Promise<RenderInfo> => {
-      const data = id === "fixture" ? FIXTURE : await loadData(id);
+      const data: RenderData = { ...(id === "fixture" ? FIXTURE : await loadData(id)), photos: await loadPhotos() };
       const { width, height } = canvasSize(data.project);
       const { timings, duration: total } = buildSlideTimings(data.slides);
       if (timings.length === 0) throw new Error("This project has no slides to render.");
@@ -446,6 +477,8 @@ export default function RenderPage() {
         /* no art library available: scenes simply render without clip art */
       }
       layers.forEach((l) => planLayer(l, data, width, height, art));
+      // A generated picture must be decoded before any frame is drawn, or early frames would show it half-loaded.
+      await Promise.all(layers.map((l) => l.photoImg?.decode?.().catch(() => undefined)));
 
       const setTime = (t: number) => {
         const state = slideStateAt(timings, t);

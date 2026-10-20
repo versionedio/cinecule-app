@@ -16,6 +16,8 @@ export interface RenderData {
   interactions: Interaction[];
   /** Word-by-word timing of each scene's narration. */
   audio: { slide_id: string; words: WordTiming[] }[];
+  /** Generated pictures by slide id (a path the render server serves); a picture scene uses its picture instead of icons. */
+  photos?: Record<string, string>;
 }
 
 export interface SlideTiming {
