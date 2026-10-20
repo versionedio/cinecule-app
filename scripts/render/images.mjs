@@ -22,7 +22,11 @@ const API = "https://api.elevenlabs.io/v1/flows/image";
 const POLL_MS = 3000; // the API asks for at least 2 s between polls
 const MAX_WAIT_MS = 150_000;
 
-const attr = (html, name) => html.match(new RegExp(`${name}="([^"]*)"`))?.[1]?.trim() ?? "";
+// An HTML attribute's value, whichever way the storyboard quoted it: name="x", name='x' or name = "x".
+const attr = (html, name) => {
+  const m = html.match(new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`));
+  return (m?.[1] ?? m?.[2] ?? "").trim();
+};
 
 /** The picture scenes in a project: [{ slideId, subjects, prompt }]. */
 export function pictureScenes(slides, style) {
@@ -126,7 +130,12 @@ export async function generateImage({ provider, prompt, outBase, aspectRatio = "
 export async function generateSceneImages({ slides, dir, log = console, env = process.env }) {
   const style = env.IMAGE_STYLE || "Photorealistic, soft natural light, shallow depth of field, rich detail, no text, no watermark, no logos.";
   const scenes = pictureScenes(slides, style);
-  if (scenes.length === 0) return {};
+  if (scenes.length === 0) {
+    // Say so: a silent skip is what made missing pictures hard to diagnose.
+    const marked = slides.filter((sl) => String(sl.html_content ?? "").includes("data-art")).length;
+    log.log(`No picture scenes to generate (${slides.length} slides, ${marked} mention data-art).`);
+    return {};
+  }
   const provider = imageProvider(env);
   if (!provider) {
     log.log(`Picture scenes found (${scenes.length}) but no image key is set; the icons will be used.`);

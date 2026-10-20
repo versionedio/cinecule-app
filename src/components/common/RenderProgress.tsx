@@ -25,8 +25,27 @@ export function formatEta(seconds: number): string {
   return `about ${m} min${s >= 5 ? ` ${s} s` : ""}`;
 }
 
-// Rendering takes roughly as long as the video plays, plus startup and encoding.
-const estimateRenderSeconds = (videoSeconds: number) => Math.round(videoSeconds * 1.1 + 40);
+// Measured on real GitHub runs (keep in step with scripts/render/render.mjs): a 1080p, 30 fps frame takes
+// about 0.07 s to draw and capture, so a film takes roughly twice its own length to render, plus the
+// worker starting up (checkout, install, browser, build), pictures when it has picture scenes, and finishing.
+const SETUP_SEC = 150;
+const PER_FRAME_SEC = 0.07;
+const PICTURES_SEC = 60;
+const FINISH_SEC = 60;
+
+function estimateRenderSeconds(videoSeconds: number, opts: { fps?: number; resolution?: string; hasPictures?: boolean } = {}): number {
+  const [w, h] = String(opts.resolution ?? "1920x1080").split("x").map(Number);
+  const scale = w > 0 && h > 0 ? (w * h) / (1920 * 1080) : 1;
+  const frames = videoSeconds * (opts.fps || 30);
+  return Math.round(SETUP_SEC + (opts.hasPictures ? PICTURES_SEC : 0) + frames * PER_FRAME_SEC * scale + FINISH_SEC);
+}
+
+/** "about 6 to 9 minutes": an honest range around the estimate, since runner speed varies. */
+function formatRange(seconds: number): string {
+  const lo = Math.max(1, Math.round((seconds * 0.85) / 60));
+  const hi = Math.max(lo + 1, Math.round((seconds * 1.3) / 60));
+  return `about ${lo} to ${hi} minutes`;
+}
 
 interface Snapshot {
   asset: ExportAsset | null;
@@ -48,6 +67,7 @@ export default function RenderProgress({
   const [snap, setSnap] = useState<Snapshot>(() => ({ asset: null, receivedAt: Date.now(), changedAt: Date.now() }));
   const [now, setNow] = useState(() => Date.now());
   const [videoSeconds, setVideoSeconds] = useState(0);
+  const [hasPictures, setHasPictures] = useState(false);
   const finished = useRef(false);
   const onFinishedRef = useRef(onFinished);
   useEffect(() => {
@@ -100,7 +120,10 @@ export default function RenderProgress({
     if (compact) return;
     entityService
       .listAll<GeneratedHtml>(ENTITY_NAMES.generatedHtml, { project_id: projectId })
-      .then((slides) => setVideoSeconds(slides.reduce((t, s) => t + (Number(s.duration) || 0), 0)))
+      .then((slides) => {
+        setVideoSeconds(slides.reduce((t, s) => t + (Number(s.duration) || 0), 0));
+        setHasPictures(slides.some((s) => /data-art\s*=\s*["']/.test(String(s.html_content ?? ""))));
+      })
       .catch(() => undefined);
   }, [projectId, compact]);
 
@@ -113,7 +136,10 @@ export default function RenderProgress({
   if (queued) {
     const waitedMs = asset ? now - queuedAtMs(asset.id) : 0;
     const slowStart = Number.isFinite(waitedMs) && waitedMs > SLOW_START_MS;
-    const estimate = videoSeconds > 0 ? ` Once it starts, a ${Math.round(videoSeconds)}-second video takes ${formatEta(estimateRenderSeconds(videoSeconds))}.` : "";
+    const estimate =
+      videoSeconds > 0
+        ? ` In total, a ${Math.round(videoSeconds)}-second film usually takes ${formatRange(estimateRenderSeconds(videoSeconds, { fps: Number(asset?.frame_rate) || 30, resolution: asset?.resolution, hasPictures }))}.`
+        : "";
     return compact ? (
       <p className="flex items-center gap-2 text-xs text-muted">
         <Spinner /> {slowStart ? "Still waiting for a render worker" : "Starting the render"}
