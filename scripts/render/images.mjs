@@ -147,32 +147,72 @@ export async function generateImage({ provider, prompt, outBase, aspectRatio = "
   return provider.name === "gemini" ? generateWithGemini(args) : generateWithElevenLabs(args);
 }
 
-const DESCRIBE_INSTRUCTIONS = `You write the image prompt for ONE scene of a narrated video. The picture appears on screen while the narrator says the scene's narration, so it must clearly relate to what is being said at that moment.
+// The colour mood each slide theme calls for, so a film's pictures sit well next to its slides.
+const THEME_MOOD = {
+  midnight: "deep midnight blues and dark tones with small warm golden highlights",
+  ember: "warm ember oranges, amber light and deep brown shadows, a dusk feel",
+  forest: "deep forest greens and soft natural daylight, earthy and fresh",
+  ocean: "teal and deep sea blues with clear, cool light",
+  paper: "warm cream and soft neutral tones, gentle diffused daylight, slightly muted and editorial",
+  slate: "cool grey-blue tones with clean, bright, even light",
+  plum: "rich plum purples and soft pinks with moody, glowing light"
+};
+const themeOfHtml = (html) => String(html ?? "").match(/data-theme\s*=\s*(?:"([^"]*)"|'([^']*)')/)?.slice(1, 3).find(Boolean)?.trim().toLowerCase();
 
-How to choose what to show:
-- If the narration is about something concrete (an animal, place, object, person doing something), show that thing itself, literally.
-- If the narration is abstract (a process, idea, feature, feeling, lesson), show a clear, concrete real-world scene or visual metaphor that stands for the idea, not a literal picture of the words. Pick ONE strong subject.
+const DESCRIBE_INSTRUCTIONS = `You write the image prompt for ONE scene of a narrated video. The picture fills the screen while the narrator says the scene's narration, so it must clearly show what is being said at that moment.
+
+CHOOSING THE SUBJECT
+- If the narration is about something concrete (an animal, place, object, a person doing something), show that thing itself, literally.
+- If the narration is abstract (a process, idea, feature, feeling, lesson), show ONE concrete real-world scene or visual metaphor that stands for the idea. Never a literal picture of the words, and never a generic stock cliche.
 - Judge by THIS scene's narration, not the film's overall topic. Do not show something that is only mentioned in passing.
 
-Write the prompt as a single photograph: the subject, setting, lighting and mood. Keep the subject centred with some empty space around it, wide 16:9 framing, uncluttered.
-Never include text, letters, numbers, logos, screenshots, charts or user interfaces, and no recognisable real people.
-Under 60 words. Reply with ONLY the prompt.`;
+BE SPECIFIC. Your prompt must contain, in one flowing paragraph of 45 to 75 words:
+1. ONE main subject, named precisely (species or object type, age, material, colour). Never "a thing", "something" or "a concept".
+2. What it is doing, or its state.
+3. A specific setting.
+4. The light and time of day.
+5. The camera: shot size, angle, and a lens feel (for example "low-angle medium shot, 85mm, shallow depth of field").
+6. The mood, leaning to the colour palette you are given.
+Use concrete nouns and adjectives. Avoid abstract words such as concept, innovation, synergy or journey. Show one subject, not a collage. Keep the subject near the centre with some calm space around it.
+Never include text, letters, numbers, logos, screens showing text, charts or user interfaces, and no recognisable real people.
 
-/** An image prompt written for one scene by a text model that reads the scene's own narration. */
-export async function describeScene({ apiKey, baseUrl, model, filmOutline, narration }) {
+EXAMPLES
+Narration: "Retractable claws stay razor-sharp, and night vision works at one-sixth of the light a human needs."
+Prompt: A grey tabby cat crouched on a mossy garden wall at dusk, pupils wide and eyes glowing faint amber, one front paw lifted with claws just visible. Blurred hedge and an indigo evening sky behind it. Low-angle medium shot, 85mm lens, shallow depth of field. Quiet, alert mood in cool blue tones with a warm rim light.
+Narration: "The platform handled the data, the workflows and the storage, so I could focus on the product."
+Prompt: A tidy wooden workshop bench seen from slightly above, tools hung in neat rows on a pegboard and a half-finished wooden model resting in the centre of the bench. Soft morning light from a side window, fine sawdust in the air. Medium shot, 50mm lens, shallow depth of field. Calm, focused mood in warm natural tones.
+
+Reply with ONLY the prompt.`;
+
+const FILM_STYLE_INSTRUCTIONS = `You are the art director of a narrated video. From the film's outline and a colour mood, write ONE short visual style direction (25 to 40 words) that every picture in the film will share, so the pictures look like they belong together: the photographic approach, lens feel, kind of light, colour grading and overall feel. Do not describe any subject. No text in images. Reply with ONLY the direction.`;
+
+async function askGemini({ apiKey, baseUrl, model, system, user, maxOutputTokens = 1024, temperature = 0.6 }) {
   const base = baseUrl || "https://generativelanguage.googleapis.com/v1beta";
   const res = await fetchRetry(`${base}/models/${model}:generateContent`, {
     method: "POST",
     headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: DESCRIBE_INSTRUCTIONS }] },
-      contents: [{ parts: [{ text: `The whole film, scene by scene (for context only):\n${filmOutline}\n\nTHIS scene's narration:\n"${narration}"\n\nWrite the image prompt for this scene.` }] }],
-      generationConfig: { temperature: 0.6, maxOutputTokens: 1024 }
-    })
+    body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ parts: [{ text: user }] }], generationConfig: { temperature, maxOutputTokens } })
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`describe ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 200)}`);
-  const text = (json.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim().replace(/^["'`]+|["'`]+$/g, "");
+  if (!res.ok) throw new Error(`text model ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 200)}`);
+  return (json.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim().replace(/^["'`]+|["'`]+$/g, "");
+}
+
+/** One visual style direction shared by every picture in the film, so they look related. */
+export async function describeFilmStyle({ apiKey, baseUrl, model, filmOutline, mood }) {
+  const text = await askGemini({ apiKey, baseUrl, model, system: FILM_STYLE_INSTRUCTIONS, user: `Film outline:\n${filmOutline}\n\nColour mood to follow: ${mood}\n\nWrite the visual style direction.`, maxOutputTokens: 600 });
+  if (text.length < 15) throw new Error("film style came back empty");
+  return text;
+}
+
+/** An image prompt written for one scene by a text model that reads the scene's own narration. */
+export async function describeScene({ apiKey, baseUrl, model, filmOutline, narration, sceneNumber, mood, filmStyle }) {
+  const user =
+    `The whole film, scene by scene (for context only):\n${filmOutline}\n\n` +
+    `Colour mood to lean towards: ${mood}\n` +
+    (filmStyle ? `Shared visual style for every picture in this film: ${filmStyle}\n` : "") +
+    `\nTHIS is scene ${sceneNumber}. Its narration:\n"${narration}"\n\nWrite the image prompt for this scene.`;
+  const text = await askGemini({ apiKey, baseUrl, model, system: DESCRIBE_INSTRUCTIONS, user });
   if (text.length < 15) throw new Error("describe returned no usable prompt");
   return text;
 }
@@ -204,13 +244,26 @@ export async function generateSceneImages({ slides, dir, log = console, env = pr
   const geminiKey = env.GEMINI_API_KEY;
   const describeModel = env.DESCRIBE_MODEL || "gemini-flash-latest";
   const filmOutline = slides.map((sl, i) => `${i + 1}. ${String(sl.narration_text ?? "").trim().slice(0, 220)}`).filter((l) => l.length > 4).join("\n");
+  // One style direction for the whole film (so the pictures look related), then one prompt per scene.
+  const filmTheme = slides.map((sl) => themeOfHtml(sl.html_content)).find(Boolean);
+  const mood = THEME_MOOD[filmTheme] ?? "natural, balanced colours with soft light";
+  let filmStyle = "";
+  if (geminiKey && scenes.some((sc) => !sc.described && sc.narration)) {
+    try {
+      filmStyle = await describeFilmStyle({ apiKey: geminiKey, baseUrl: env.GEMINI_BASE_URL, model: describeModel, filmOutline, mood });
+      log.log(`Visual style for the film (${filmTheme ?? "no theme"}): ${filmStyle}`);
+    } catch (e) {
+      log.warn(`Could not write a shared visual style; each picture is styled on its own. ${e?.message || e}`);
+    }
+  }
   await Promise.all(
     scenes.map(async (scene) => {
       try {
         let prompt = scene.prompt;
         if (!scene.described && geminiKey && scene.narration) {
           try {
-            prompt = `${await describeScene({ apiKey: geminiKey, baseUrl: env.GEMINI_BASE_URL, model: describeModel, filmOutline, narration: scene.narration })} ${style}`;
+            const sceneNumber = slides.findIndex((sl) => sl.id === scene.slideId) + 1;
+            prompt = `${await describeScene({ apiKey: geminiKey, baseUrl: env.GEMINI_BASE_URL, model: describeModel, filmOutline, narration: scene.narration, sceneNumber, mood, filmStyle })} ${style}`;
           } catch (e) {
             log.warn(`Could not write a description for ${scene.slideId}; using the plain subject. ${e?.message || e}`);
           }
