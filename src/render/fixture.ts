@@ -92,8 +92,9 @@ export const FIXTURE: RenderData = {
  * The themed design system on one film: every layout in one theme. Open `/render/fixture?theme=forest&bg=glow`
  * (themes: see src/render/theme.ts). Used to look at a theme before trusting it.
  */
-export function fixtureThemed(theme: string, bg: string): RenderData {
-  const root = (layout: string, inner: string, extra = "") => `<div class="cc ${layout}" data-theme="${theme}" data-bg="${bg}"${extra}>${inner}</div>`;
+export function fixtureThemed(theme: string, bg: string, font = "theme"): RenderData {
+  const fontAttr = font && font !== "theme" ? ` data-font="${font}"` : "";
+  const root = (layout: string, inner: string, extra = "") => `<div class="cc ${layout}" data-theme="${theme}" data-bg="${bg}"${fontAttr}${extra}>${inner}</div>`;
   const slideDefs: { id: string; html: string; text: string; transition: string }[] = [
     { id: "t1", transition: "fade", text: "Cats have lived beside people for about nine thousand five hundred years.", html: root("cc-title", `<h1 id="t1-title" class="cc-h">Cats: <em>9,500 years</em> beside us</h1><p id="t1-sub" class="cc-sub">A short tour of the house tiger</p>`) },
     { id: "t2", transition: "slide-left", text: "Cats are built to hunt. They see in dim light, hear ultrasound, and their whiskers sense moving air.", html: root("cc-points", `<h2 id="t2-title" class="cc-h">Built to <em>hunt</em></h2><div id="t2-card1" class="cc-card">Sees in <em>dim light</em></div><div id="t2-card2" class="cc-card">Hears <em>ultrasound</em></div><div id="t2-card3" class="cc-card">Whiskers sense <em>moving air</em></div>`) },

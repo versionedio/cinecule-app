@@ -6,6 +6,8 @@ import { startPipeline } from "@/services/pipelineService";
 import { ENTITY_NAMES, ExportAsset, GeneratedHtml, Project, ProjectStatus } from "@/config/entities";
 import RenderProgress from "@/components/common/RenderProgress";
 import { AssistantBubble, Typed, TypingDots } from "@/components/chat/Bubbles";
+import DesignChoicesCard from "@/components/chat/DesignChoicesCard";
+import { DesignChoices, designChoicesText } from "@/render/theme";
 import { Button } from "@/components/ui/button";
 
 const POLL_MS = 2500;
@@ -45,6 +47,9 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
   const [error, setError] = useState("");
   // A film made in this conversation starts by itself; an older draft only starts when asked.
   const [kicked, setKicked] = useState(false);
+  // A film made in this conversation first asks how it should look; answering (or skipping) starts it.
+  const [designDone, setDesignDone] = useState(false);
+  const [savingDesign, setSavingDesign] = useState(false);
   const started = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -89,10 +94,10 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
   };
 
   useEffect(() => {
-    if (status !== "draft" || started.current || !(autoStart || kicked)) return;
+    if (status !== "draft" || started.current || !((autoStart && designDone) || kicked)) return;
     started.current = true;
     begin();
-  }, [status, autoStart, kicked]);
+  }, [status, autoStart, kicked, designDone]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -126,6 +131,21 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
     }
   };
 
+  // The choices travel to the storyboard step as text on the project (its existing article field).
+  const submitDesign = async (choices: DesignChoices | null) => {
+    setSavingDesign(true);
+    const text = choices ? designChoicesText(choices) : "";
+    try {
+      if (text) await entityService.update(ENTITY_NAMES.project, projectId, { article_content: text });
+    } catch (e) {
+      console.warn("[chat] couldn't save the design choices; the film will be styled automatically", e);
+    }
+    setSavingDesign(false);
+    setDesignDone(true);
+  };
+
+  const asking = autoStart && status === "draft" && !designDone && !kicked;
+
   const retry = async () => {
     started.current = false; // let the draft status start the pipeline again
     setKicked(true);
@@ -138,7 +158,14 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
     <>
       {/* 1. Sources */}
       <AssistantBubble>
-        {status === "draft" && !autoStart && !kicked ? (
+        {asking ? (
+          <>
+            <p>
+              <Typed key="design" text="Got it. Before I start, how should it look? Pick what you like, or skip and I'll decide." />
+            </p>
+            <DesignChoicesCard onSubmit={submitDesign} onSkip={() => submitDesign(null)} busy={savingDesign} />
+          </>
+        ) : status === "draft" && !autoStart && !kicked ? (
           <>
             <p>
               <Typed key="idle" text="This film hasn't been started yet. Shall I begin?" />

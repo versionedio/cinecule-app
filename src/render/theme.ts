@@ -49,6 +49,69 @@ export const THEMES: Theme[] = [
 export const DEFAULT_THEME = "midnight";
 export const LAYOUTS = ["cc-title", "cc-points", "cc-stat", "cc-split", "cc-quote", "cc-closing", "cc-picture"] as const;
 
+/** Font pairings a user can pick instead of the theme's own (data-font on the slide). */
+export interface FontStyle {
+  id: string;
+  label: string;
+  description: string;
+  head?: string;
+  headWeight?: number;
+  body?: string;
+  fonts?: string[];
+}
+export const FONT_STYLES: FontStyle[] = [
+  { id: "theme", label: "Match the theme", description: "Each theme's own font pairing" },
+  { id: "editorial", label: "Editorial serif", description: "Serif headlines, calm and literary", head: "Playfair Display", headWeight: 800, body: "Source Sans 3", fonts: ["Playfair+Display:wght@700;800", "Source+Sans+3:wght@400;600"] },
+  { id: "clean", label: "Clean sans", description: "Neutral and modern", head: "Inter", headWeight: 800, body: "Inter", fonts: ["Inter:wght@400;600;800"] },
+  { id: "bold", label: "Bold display", description: "Heavy, friendly headlines", head: "Poppins", headWeight: 700, body: "Inter", fonts: ["Poppins:wght@600;700", "Inter:wght@400;600"] }
+];
+
+export interface Choice {
+  id: string;
+  label: string;
+  description: string;
+}
+export const BACKGROUNDS: Choice[] = [
+  { id: "plain", label: "Plain", description: "One flat color, the calmest" },
+  { id: "gradient", label: "Gradient", description: "A soft blend of two shades" },
+  { id: "glow", label: "Glow", description: "A subtle light behind the text" }
+];
+export const LAYOUT_MIXES: Choice[] = [
+  { id: "balanced", label: "Balanced", description: "A mix of cards, numbers, comparisons and quotes" },
+  { id: "text", label: "Text-led", description: "Mostly title-and-cards slides" },
+  { id: "visual", label: "Visual-led", description: "More big numbers, quotes and pictures" },
+  { id: "minimal", label: "Minimal", description: "One short phrase per slide" }
+];
+export const PICTURE_AMOUNTS: Choice[] = [
+  { id: "none", label: "None", description: "Words only" },
+  { id: "few", label: "A few", description: "About one scene in five" },
+  { id: "many", label: "Plenty", description: "About one scene in three" }
+];
+
+/** What the viewer chose before the film was made; every field may be "decide" (left to the AI). */
+export interface DesignChoices {
+  theme: string;
+  background: string;
+  font: string;
+  layout: string;
+  pictures: string;
+}
+export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide" };
+
+/**
+ * The choices as plain text for the storyboard step (saved on the project). The storyboard prompt tells the
+ * AI to follow these exactly. Returns "" when nothing was chosen, so the film is styled automatically.
+ */
+export function designChoicesText(c: DesignChoices): string {
+  const lines: string[] = [];
+  if (c.theme !== "decide") lines.push(`- Theme: ${c.theme} (use data-theme="${c.theme}" on every scene)`);
+  if (c.background !== "decide") lines.push(`- Background: ${c.background} (use data-bg="${c.background}" on every scene)`);
+  if (c.font !== "theme") lines.push(`- Font style: ${c.font} (use data-font="${c.font}" on every scene)`);
+  if (c.layout !== "balanced") lines.push(`- Layout mix: ${c.layout} (${LAYOUT_MIXES.find((m) => m.id === c.layout)?.description ?? ""})`);
+  if (c.pictures !== "decide") lines.push(`- Picture scenes: ${c.pictures} (${PICTURE_AMOUNTS.find((m) => m.id === c.pictures)?.description ?? ""})`);
+  return lines.length ? `DESIGN CHOICES FROM THE USER (follow exactly; anything not listed is yours to decide):\n${lines.join("\n")}` : "";
+}
+
 const rgb = (hex: string) => {
   const n = parseInt(hex.slice(1), 16);
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
@@ -91,7 +154,17 @@ const BASE_CSS = `
 .cc-picture{padding:0}
 `;
 
-const fontHref = (t: Theme) => `https://fonts.googleapis.com/css2?${t.fonts.map((f) => `family=${f}`).join("&")}&display=block`;
+const fontOverrideCss = FONT_STYLES.filter((f) => f.head)
+  .map((f) => `.cc[data-font="${f.id}"]{--head:'${f.head}',${f.id === "editorial" ? "Georgia,serif" : "system-ui,sans-serif"};--head-w:${f.headWeight};--body:'${f.body}',system-ui,-apple-system,'Segoe UI',Arial,sans-serif}`)
+  .join("");
+
+const fontHref = (families: string[]) => `https://fonts.googleapis.com/css2?${families.map((f) => `family=${f}`).join("&")}&display=block`;
+
+/** The font style a slide asks for (data-font), if it is one of the overrides. */
+export function fontStyleOf(html: string): FontStyle | null {
+  const id = html.match(/data-font\s*=\s*(?:"([^"]*)"|'([^']*)')/)?.slice(1, 3).find(Boolean)?.trim().toLowerCase();
+  return FONT_STYLES.find((f) => f.id === id && f.head) ?? null;
+}
 
 /** The theme a slide asks for (its data-theme attribute, either quote style), or null for an older, self-styled slide. */
 export function themeOf(html: string): Theme | null {
@@ -107,7 +180,9 @@ export function themeOf(html: string): Theme | null {
 export function themeHead(html: string): string {
   const t = themeOf(html);
   if (!t) return "";
-  return `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="${fontHref(t)}"><style>${themeVars(t)}${BASE_CSS}</style>`;
+  const override = fontStyleOf(html);
+  const families = override?.fonts ?? t.fonts;
+  return `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="${fontHref(families)}"><style>${themeVars(t)}${fontOverrideCss}${BASE_CSS}</style>`;
 }
 
 /** What the storyboard prompt should say about the themes, so the prompt and the stylesheet never drift apart. */
