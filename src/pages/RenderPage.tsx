@@ -385,8 +385,8 @@ function findBlocks(doc: Document, width: number, height: number): HTMLElement[]
   return out;
 }
 
-function poseLayer(layer: Layer, local: number, width: number, height: number) {
-  layer.camera.style.transform = cameraTransform(cameraAt(layer.plan.shots, local), width, height);
+function poseLayer(layer: Layer, local: number, width: number, height: number, flat = false) {
+  layer.camera.style.transform = flat ? "none" : cameraTransform(cameraAt(layer.plan.shots, local), width, height);
 
   // Slow drift: alternate scenes push in and pull out, with a small sideways glide. Small enough to
   // stay inside the slide's padding, so it can never crop content.
@@ -397,7 +397,7 @@ function poseLayer(layer: Layer, local: number, width: number, height: number) {
   const scale = dir > 0 ? 1 + amp * p : 1 + amp - amp * p;
   const glideX = (layer.index % 3 === 0 ? -1 : 1) * 0.012 * width * (p - 0.5);
   const glideY = (layer.index % 2 === 0 ? 1 : -1) * 0.006 * height * (p - 0.5);
-  layer.ambient.style.transform = `translate(${glideX.toFixed(2)}px, ${glideY.toFixed(2)}px) scale(${scale.toFixed(4)})`;
+  layer.ambient.style.transform = flat ? "none" : `translate(${glideX.toFixed(2)}px, ${glideY.toFixed(2)}px) scale(${scale.toFixed(4)})`;
 
   resetEffects(layer);
   // Picture: the icon is drawn on stroke by stroke, then idles gently.
@@ -453,6 +453,8 @@ export default function RenderPage() {
   const [error, setError] = useState("");
   const scrub = params.get("scrub") === "1";
   const debug = params.get("debug") === "1";
+  // ?flat=1 holds the camera still, so a slide can be judged by eye (used by the theme gallery).
+  const flat = params.get("flat") === "1";
   // Picture scenes need the icon library; ?art=0 turns it off.
   const artOn = params.get("art") !== "0";
   const [duration, setDuration] = useState(0);
@@ -464,7 +466,7 @@ export default function RenderPage() {
     let cancelled = false;
 
     const ready = (async (): Promise<RenderInfo> => {
-      const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient") : FIXTURE) : await loadData(id)), photos: await loadPhotos() };
+      const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient", params.get("font") ?? "theme") : FIXTURE) : await loadData(id)), photos: await loadPhotos() };
       const { width, height } = canvasSize(data.project);
       const { timings, duration: total } = buildSlideTimings(data.slides);
       if (timings.length === 0) throw new Error("This project has no slides to render.");
@@ -497,12 +499,12 @@ export default function RenderPage() {
           if (isCurrent) {
             layer.root.style.opacity = "1";
             layer.root.style.transform = "none";
-            poseLayer(layer, state.local, width, height);
+            poseLayer(layer, state.local, width, height, flat);
           } else if (isIncoming && state.incoming) {
             const st = transitionStyle(layer.timing.slide.transition, state.incoming.progress);
             layer.root.style.opacity = st.opacity;
             layer.root.style.transform = st.transform;
-            poseLayer(layer, 0, width, height);
+            poseLayer(layer, 0, width, height, flat);
           }
         });
       };
@@ -546,7 +548,7 @@ export default function RenderPage() {
       cancelled = true;
       delete window.__render;
     };
-  }, [id, debug, artOn]);
+  }, [id, debug, artOn, flat]);
 
   return (
     <div style={{ background: "#000", minHeight: "100vh" }}>
