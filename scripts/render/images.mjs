@@ -186,7 +186,7 @@ Reply with ONLY the prompt.`;
 
 const FILM_STYLE_INSTRUCTIONS = `You are the art director of a narrated video. From the film's outline and a colour mood, write ONE short visual style direction (25 to 40 words) that every picture in the film will share, so the pictures look like they belong together: the photographic approach, lens feel, kind of light, colour grading and overall feel. Do not describe any subject. No text in images. Reply with ONLY the direction.`;
 
-async function askGemini({ apiKey, baseUrl, model, system, user, maxOutputTokens = 1024, temperature = 0.6 }) {
+async function askGemini({ apiKey, baseUrl, model, system, user, maxOutputTokens = 2048, temperature = 0.6 }) {
   const base = baseUrl || "https://generativelanguage.googleapis.com/v1beta";
   const res = await fetchRetry(`${base}/models/${model}:generateContent`, {
     method: "POST",
@@ -195,12 +195,15 @@ async function askGemini({ apiKey, baseUrl, model, system, user, maxOutputTokens
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`text model ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 200)}`);
-  return (json.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim().replace(/^["'`]+|["'`]+$/g, "");
+  // The model's own reasoning shares the output limit, so a too-small limit cuts the answer off. Never use a cut-off answer.
+  const finish = json.candidates?.[0]?.finishReason;
+  if (finish === "MAX_TOKENS") throw new Error("the text model's answer was cut off (raise the limit)");
+  return (json.candidates?.[0]?.content?.parts ?? []).filter((p) => !p.thought).map((p) => p.text ?? "").join("").trim().replace(/^["'`]+|["'`]+$/g, "");
 }
 
 /** One visual style direction shared by every picture in the film, so they look related. */
 export async function describeFilmStyle({ apiKey, baseUrl, model, filmOutline, mood }) {
-  const text = await askGemini({ apiKey, baseUrl, model, system: FILM_STYLE_INSTRUCTIONS, user: `Film outline:\n${filmOutline}\n\nColour mood to follow: ${mood}\n\nWrite the visual style direction.`, maxOutputTokens: 600 });
+  const text = await askGemini({ apiKey, baseUrl, model, system: FILM_STYLE_INSTRUCTIONS, user: `Film outline:\n${filmOutline}\n\nColour mood to follow: ${mood}\n\nWrite the visual style direction.`, maxOutputTokens: 2048 });
   if (text.length < 15) throw new Error("film style came back empty");
   return text;
 }
