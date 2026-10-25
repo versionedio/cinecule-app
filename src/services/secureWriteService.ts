@@ -12,7 +12,7 @@ const EDITABLE: Record<string, string[]> = {
   [ENTITY_NAMES.project]: COMMON.concat([
     "article_content", "video_type", "status", "canvas_aspect_ratio", "custom_canvas_width", "custom_canvas_height",
     "director_camera_intensity", "director_auto_generate_effects", "director_zoom_hold_after_effect_sec",
-    "director_camera_move_duration_sec", "cursor_speed", "render_resolution", "render_fps", "error_message"
+    "director_camera_move_duration_sec", "cursor_speed", "render_resolution", "render_fps", "error_message", "voice_id"
   ]),
   [ENTITY_NAMES.generatedHtml]: COMMON.concat(["html_content", "sort_order", "duration", "transition", "transition_duration", "narration_text"]),
   [ENTITY_NAMES.interaction]: COMMON.concat(["slide_id", "target_text", "target_selector", "action", "trigger", "time_offset", "duration", "label", "sort_order"]),

@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowLeft, MousePointerClick } from "lucide-react";
 import { createRecord, deleteRecord, secureWrite, updateRecord } from "@/services/secureWriteService";
+import { TRANSITION_CHOICES } from "@/render/transitions";
 
 const selectCls =
   "h-10 rounded-[4px] border border-border bg-transparent px-3 text-sm text-foreground focus-visible:outline-none focus-visible:border-primary";
@@ -291,8 +292,8 @@ export default function StoryboardEditorPage() {
                   updateRecord(ENTITY_NAMES.generatedHtml, activeSlide.id, { transition });
                 }}
               >
-                {["fade", "slide-left", "slide-right", "zoom-in", "zoom-out", "flip", "none"].map((t) => (
-                  <option key={t} value={t}>{t}</option>
+                {TRANSITION_CHOICES.map((t) => (
+                  <option key={t.id} value={t.id} title={t.description}>{t.label}</option>
                 ))}
               </select>
             </Field>

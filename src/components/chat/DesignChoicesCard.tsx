@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Play } from "lucide-react";
 import { BACKGROUNDS, DesignChoices, FONT_STYLES, FORMATS, LAYOUT_MIXES, LENGTHS, NO_CHOICES, PICTURE_AMOUNTS, THEMES } from "@/render/theme";
 import DesignPreview from "@/components/chat/DesignPreview";
+import VoicePicker from "@/components/chat/VoicePicker";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -114,6 +115,11 @@ export default function DesignChoicesCard({ onSubmit, onSkip, busy }: { onSubmit
           <Chip key={f.id} selected={c.format === f.id} onClick={() => set({ format: f.id })} title={f.description}>{f.label}</Chip>
         ))}
       </Group>
+
+      <div>
+        <p className="mb-1.5 text-xs uppercase tracking-widest text-muted">Narrator</p>
+        <VoicePicker value={c.voice} onChange={(voice) => set({ voice })} />
+      </div>
 
       <div className="flex flex-wrap gap-2 pt-1">
         <Button onClick={() => onSubmit(c)} disabled={busy}>

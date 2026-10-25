@@ -10,6 +10,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { client, login } from "./lib.mjs";
 import { generateSceneImages } from "./images.mjs";
@@ -84,7 +85,29 @@ function printDecisions(decisions = []) {
   for (const d of decisions) console.log(`  ${d.status === "kept" ? "+" : "-"} ${d.scene} ${d.selector || d.id}: ${d.reason}`);
 }
 
-/** audioClips: [{ file, start }] with `start` in seconds from the beginning of the video. */
+
+// Sounds under scene transitions (see scripts/render/sfx/sfx.json). A transition is a move of `enter` seconds ending as the
+// scene starts, so its sound is placed with its loudest moment at the middle of that move, where the motion is fastest.
+const SFX_DIR = fileURLToPath(new URL("./sfx/", import.meta.url));
+function transitionSfx(info) {
+  if (process.env.NO_SFX === "1" || process.argv.includes("--no-sfx")) return [];
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(SFX_DIR, "sfx.json"), "utf8"));
+  } catch {
+    return []; // sounds are a nicety: a missing manifest must never stop a render
+  }
+  const clips = [];
+  for (const s of info.slides ?? []) {
+    if (!s.enter || !s.transition || s.transition === "none") continue;
+    const entry = manifest.files[manifest.forTransition[s.transition]];
+    if (!entry || !fs.existsSync(path.join(SFX_DIR, entry.file))) continue;
+    clips.push({ file: path.join(SFX_DIR, entry.file), start: Math.max(0, s.start - s.enter / 2 - entry.peakAt), gain: entry.gain });
+  }
+  return clips;
+}
+
+/** audioClips: [{ file, start, gain? }] with `start` in seconds from the beginning of the video. */
 async function renderVideo({ url, token, resolution, fps, audioClips, outFile, maxSeconds, onProgress = () => {} }) {
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage", "--force-color-profile=srgb"] });
   try {
@@ -112,13 +135,15 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
 
     const duration = maxSeconds ? Math.min(info.duration, maxSeconds) : info.duration;
     const frames = Math.max(1, Math.round(duration * fps));
-    const clips = (await audioClips(info)).filter((c) => c.start < duration);
+    const sfx = transitionSfx(info);
+    if (sfx.length) console.log(`Transition sounds: ${sfx.map((c) => `${path.basename(c.file, ".mp3")}@${c.start.toFixed(2)}s`).join(", ")}`);
+    const clips = [...(await audioClips(info)), ...sfx].filter((c) => c.start < duration);
 
     const args = ["-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(fps), "-c:v", "mjpeg", "-i", "-"];
     clips.forEach((c) => args.push("-i", c.file));
     const filters = ["[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v]"];
     if (clips.length) {
-      clips.forEach((c, i) => filters.push(`[${i + 1}:a]aresample=44100,adelay=${Math.round(c.start * 1000)}|${Math.round(c.start * 1000)}[a${i}]`));
+      clips.forEach((c, i) => filters.push(`[${i + 1}:a]aresample=44100,volume=${c.gain ?? 1},adelay=${Math.round(c.start * 1000)}|${Math.round(c.start * 1000)}[a${i}]`));
       filters.push(`${clips.map((_, i) => `[a${i}]`).join("")}amix=inputs=${clips.length}:normalize=0:duration=longest[aout]`);
     }
     args.push("-filter_complex", filters.join(";"), "-map", "[v]");

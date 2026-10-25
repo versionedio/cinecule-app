@@ -162,7 +162,7 @@ export interface ExportAsset {
   created_at?: string;
 }
 
-export type TransitionType = "fade" | "slide-left" | "slide-right" | "zoom-in" | "zoom-out" | "flip" | "none";
+export type TransitionType = "fade" | "slide-left" | "slide-right" | "zoom-in" | "zoom-out" | "flip" | "wipe" | "iris" | "flash" | "none";
 
 export interface GeneratedHtml {
   id: string;

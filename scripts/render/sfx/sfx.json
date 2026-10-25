@@ -1,0 +1,21 @@
+{
+  "_about": "Sounds laid under scene transitions. peakAt is when each sound is loudest (seconds into the file); the renderer lines that up with the middle of the transition's motion. gain is its level in the mix, well under the narration.",
+  "files": {
+    "soft": { "file": "soft.mp3", "peakAt": 0.22, "gain": 0.28 },
+    "push": { "file": "push.mp3", "peakAt": 0.10, "gain": 0.32 },
+    "whip": { "file": "whip.mp3", "peakAt": 0.19, "gain": 0.36 },
+    "zoom": { "file": "zoom.mp3", "peakAt": 0.27, "gain": 0.32 },
+    "impact": { "file": "impact.mp3", "peakAt": 0.01, "gain": 0.36 }
+  },
+  "forTransition": {
+    "fade": "soft",
+    "slide-left": "push",
+    "slide-right": "push",
+    "zoom-in": "zoom",
+    "zoom-out": "zoom",
+    "flip": "whip",
+    "wipe": "push",
+    "iris": "soft",
+    "flash": "impact"
+  }
+}

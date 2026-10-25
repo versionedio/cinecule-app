@@ -132,8 +132,10 @@ export interface DesignChoices {
   length: string;
   /** One of FORMATS ("wide" unless chosen). */
   format: string;
+  /** "decide" (the standard voice) or an ElevenLabs voice id from src/config/voices.ts. */
+  voice: string;
 }
-export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide" };
+export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide", voice: "decide" };
 
 /** The canvas the chosen format asks for. */
 export const formatOf = (id: string): FormatChoice => FORMATS.find((f) => f.id === id) ?? FORMATS[0];

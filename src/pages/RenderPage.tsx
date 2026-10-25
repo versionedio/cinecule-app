@@ -9,6 +9,7 @@ import {
 import { Box, Decision, Intensity, Measured, PlannedEffect, PlannedReveal, Proposal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
 import { FIXTURE, fixtureThemed } from "@/render/fixture";
 import { themeHead } from "@/render/theme";
+import { Pose, isCut, transitionFrames, transitionSeconds } from "@/render/transitions";
 import { ArtIndex, buildIndex, findArtSlots, insertArt, loadCatalog, pickArt, resolveSubject } from "@/render/art";
 
 /**
@@ -88,6 +89,9 @@ interface Layer {
   loaded: Promise<void>;
   plan: ScenePlan;
   words: WordTiming[];
+  // How long the transition into this scene lasts (0 for the first scene or a hard cut). Its opening content starts
+  // arriving this much earlier, so it is already coming in as the old scene leaves.
+  enter: number;
   // Blocks of content that arrive when the narrator reaches them.
   reveals: { el: HTMLElement; plan: PlannedReveal }[];
   // Clip art, placed in free space and arriving with the word it illustrates.
@@ -292,7 +296,7 @@ function buildLayer(host: HTMLElement, timing: SlideTiming, index: number, width
   ambient.appendChild(camera);
   root.appendChild(ambient);
   host.appendChild(root);
-  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], hero: false, accent: ACCENT, original: new Map(), followSpans: new Map() };
+  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], enter: 0, reveals: [], arts: [], hero: false, accent: ACCENT, original: new Map(), followSpans: new Map() };
 }
 
 /** Once a slide has loaded, let the director decide what really happens in it. */
@@ -437,8 +441,13 @@ function poseLayer(layer: Layer, local: number, width: number, height: number, f
     el.style.transform = `translateY(${bob.toFixed(1)}px) rotate(${tilt.toFixed(2)}deg) scale(${(0.94 + 0.06 * draw).toFixed(3)})`;
   }
   // Arrivals first: an element is hidden and lowered until its moment, then settles into place.
+  // The scene's first block(s) begin arriving the moment the transition into it starts and finish as it lands (overlapping
+  // action), instead of the new scene showing an empty background until the first word is spoken. Blocks after that keep
+  // to the narration. The shift is constant, so nothing jumps when the transition ends.
+  const firstDue = layer.reveals.reduce((m, r) => Math.min(m, r.plan.start), Infinity);
   for (const { el, plan } of layer.reveals) {
-    const prog = revealProgress(plan, local);
+    const opening = layer.enter > 0 && plan.start <= firstDue + 0.3;
+    const prog = revealProgress(plan, opening ? local + plan.start + layer.enter : local);
     if (prog >= 1) continue;
     touch(layer, el);
     anchorToElement(el);
@@ -450,18 +459,6 @@ function poseLayer(layer: Layer, local: number, width: number, height: number, f
     if (!planned) continue;
     if (planned.kind === "follow") applyFollow(layer, planned, fx, local);
     else applyEffect(layer, fx);
-  }
-}
-
-function transitionStyle(kind: string, q: number): { opacity: string; transform: string } {
-  const e = easeOut(q);
-  switch (kind) {
-    case "slide-left": return { opacity: "1", transform: `translateX(${(1 - e) * 100}%)` };
-    case "slide-right": return { opacity: "1", transform: `translateX(${-(1 - e) * 100}%)` };
-    case "zoom-in": return { opacity: String(e), transform: `scale(${0.88 + 0.12 * e})` };
-    case "zoom-out": return { opacity: String(e), transform: `scale(${1.12 - 0.12 * e})` };
-    case "flip": return { opacity: String(e > 0.5 ? 1 : e * 2), transform: `perspective(1600px) rotateY(${(1 - e) * 90}deg)` };
-    default: return { opacity: String(e), transform: "none" }; // fade
   }
 }
 
@@ -489,6 +486,9 @@ export default function RenderPage() {
       // The built-in sample film can be shown in another shape (?aspect=9:16 or 1:1), to judge the vertical and square styles.
       const shape = params.get("aspect");
       if (id === "fixture" && (shape === "9:16" || shape === "1:1")) data.project = { ...data.project, canvas_aspect_ratio: shape };
+      // The sample film can be forced to one transition (?transition=slide-left), to judge how it looks.
+      const forced = params.get("transition");
+      if (id === "fixture" && forced) data.slides = data.slides.map((sl) => ({ ...sl, transition: forced as typeof sl.transition, transition_duration: 0.6 }));
       const { width, height } = canvasSize(data.project);
       const { timings, duration: total } = buildSlideTimings(data.slides);
       if (timings.length === 0) throw new Error("This project has no slides to render.");
@@ -496,6 +496,9 @@ export default function RenderPage() {
       host.style.cssText = `position:relative;width:${width}px;height:${height}px;overflow:hidden;background:#000;`;
       host.replaceChildren();
       const layers = timings.map((t, i) => buildLayer(host, t, i, width, height));
+      layers.forEach((l, i) => {
+        l.enter = i > 0 && !isCut(l.timing.slide.transition) ? transitionSeconds(l.timing.slide.transition, l.timing.slide.transition_duration) : 0;
+      });
 
       // Every slide must be fully loaded (and Tailwind applied) before layout is measured.
       await Promise.all(layers.map((l) => l.loaded));
@@ -511,22 +514,70 @@ export default function RenderPage() {
       // A generated picture must be decoded before any frame is drawn, or early frames would show it half-loaded.
       await Promise.all(layers.map((l) => l.photoImg?.decode?.().catch(() => undefined)));
 
+      // Motion blur along the direction of travel. CSS has no directional blur, so two SVG blurs (one for the scene
+      // leaving, one for the scene arriving) have their strength set on every frame.
+      const svgNS = "http://www.w3.org/2000/svg";
+      const defs = document.createElementNS(svgNS, "svg");
+      defs.setAttribute("width", "0");
+      defs.setAttribute("height", "0");
+      defs.style.cssText = "position:absolute;width:0;height:0;pointer-events:none;";
+      const makeBlur = (id: string) => {
+        const f = document.createElementNS(svgNS, "filter");
+        f.setAttribute("id", id);
+        for (const [k, v] of [["x", "-20%"], ["y", "-20%"], ["width", "140%"], ["height", "140%"], ["color-interpolation-filters", "sRGB"]]) f.setAttribute(k, v);
+        const g = document.createElementNS(svgNS, "feGaussianBlur");
+        g.setAttribute("stdDeviation", "0 0");
+        f.appendChild(g);
+        defs.appendChild(f);
+        return g;
+      };
+      const blurOut = makeBlur("__tr_out");
+      const blurIn = makeBlur("__tr_in");
+      host.appendChild(defs);
+      // The white flash laid over a transition (zero opacity, and so invisible, the rest of the time).
+      const flashEl = document.createElement("div");
+      flashEl.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;background:#fff;opacity:0;pointer-events:none;z-index:50;`;
+      host.appendChild(flashEl);
+
+      const place = (layer: Layer, p: Pose, node: SVGFEGaussianBlurElement, id: string) => {
+        const st = layer.root.style;
+        st.opacity = p.opacity.toFixed(4);
+        st.zIndex = String(p.z);
+        st.transform = p.x || p.y || p.scale !== 1 ? `translate(${p.x.toFixed(2)}px, ${p.y.toFixed(2)}px) scale(${p.scale.toFixed(4)})` : "none";
+        st.clipPath = p.clip || "none";
+        if (p.blurX > 0.3 || p.blurY > 0.3) {
+          node.setAttribute("stdDeviation", `${p.blurX.toFixed(2)} ${p.blurY.toFixed(2)}`);
+          st.filter = `url(#${id})`;
+        } else st.filter = p.blur > 0.3 ? `blur(${p.blur.toFixed(2)}px)` : "none";
+      };
+      // A scene at rest is exactly at home: no transform, no filter, nothing left over from a transition.
+      const rest = (layer: Layer) => {
+        const st = layer.root.style;
+        st.opacity = "1";
+        st.zIndex = "1";
+        st.transform = "none";
+        st.filter = "none";
+        st.clipPath = "none";
+      };
+
       const setTime = (t: number) => {
         const state = slideStateAt(timings, t);
+        const arriving = state.incoming;
+        // Both scenes move during a transition, so the pair is worked out together.
+        const frames = arriving ? transitionFrames(layers[arriving.index]?.timing.slide.transition, arriving.progress, width, height, arriving.index) : null;
+        flashEl.style.opacity = (frames?.flash ?? 0).toFixed(3);
         layers.forEach((layer, i) => {
           const isCurrent = i === state.index;
-          const isIncoming = state.incoming?.index === i;
+          const isIncoming = arriving?.index === i;
           layer.root.style.visibility = isCurrent || isIncoming ? "visible" : "hidden";
-          layer.root.style.zIndex = isIncoming ? "2" : "1";
           if (isCurrent) {
-            layer.root.style.opacity = "1";
-            layer.root.style.transform = "none";
+            if (frames) place(layer, frames.out, blurOut, "__tr_out");
+            else rest(layer);
             poseLayer(layer, state.local, width, height, flat);
-          } else if (isIncoming && state.incoming) {
-            const st = transitionStyle(layer.timing.slide.transition, state.incoming.progress);
-            layer.root.style.opacity = st.opacity;
-            layer.root.style.transform = st.transform;
-            poseLayer(layer, 0, width, height, flat);
+          } else if (isIncoming && frames) {
+            place(layer, frames.in, blurIn, "__tr_in");
+            // The arriving scene's own clock runs up to 0 as the transition completes, so its opening content is mid-arrival.
+            poseLayer(layer, -(1 - (arriving?.progress ?? 1)) * layer.enter, width, height, flat);
           }
         });
       };
@@ -559,7 +610,8 @@ export default function RenderPage() {
         width,
         height,
         duration: total,
-        slides: timings.map((t) => ({ id: t.slide.id, start: t.start, end: t.end })),
+        // `enter` is how long the transition into this scene lasts (0 for the first scene or a hard cut): the renderer lays a sound under it.
+        slides: timings.map((t, i) => ({ id: t.slide.id, start: t.start, end: t.end, transition: layers[i].enter > 0 ? t.slide.transition : "none", enter: layers[i].enter })),
         decisions: layers.flatMap((l) => l.plan.decisions.map((d) => ({ ...d, scene: l.timing.slide.name || l.timing.slide.id })))
       };
     })();
