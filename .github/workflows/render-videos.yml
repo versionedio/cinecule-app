@@ -4,14 +4,12 @@ name: Render videos
 #
 # Triggers:
 #  - workflow_dispatch: the platform calls this through its GitHub connector the moment a render is
-#    queued, so rendering starts within about a minute and nothing polls in the meantime.
-#  - schedule (hourly): a safety net that picks up anything a missed dispatch left behind.
+#    queued, so rendering starts within about a minute and nothing polls in the meantime. It can also
+#    be run by hand from the Actions tab (use the dev branch) if a render is ever left queued.
 #
 # The first step only needs Node, so the heavy install/build/render steps are skipped when nothing
-# is queued. Dispatch and scheduled triggers only work from the default branch.
+# is queued. Dispatch only works from the default branch.
 on:
-  schedule:
-    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:

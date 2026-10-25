@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, ArrowUp, File as FileIcon, Image as ImageIcon, Link2, LogOut, Paperclip, Trash2, X } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
@@ -57,6 +57,7 @@ export default function ChatPage() {
   // Opening an existing film: its conversation is rebuilt from what was saved.
   const [loading, setLoading] = useState(id !== "new");
   const fileInput = useRef<HTMLInputElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const thread = useRef<HTMLDivElement>(null);
   const nextId = useRef(1);
@@ -164,6 +165,15 @@ export default function ChatPage() {
     }
   };
 
+  // The box grows with what is typed so the whole message stays visible, up to 40% of the screen; past that it scrolls
+  // inside itself. Measuring from "auto" first lets it shrink again when text is deleted or sent.
+  useLayoutEffect(() => {
+    const el = input.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
+
   const submit = async () => {
     if (!canSubmit) return;
     const message = text.trim();
@@ -236,6 +246,7 @@ export default function ChatPage() {
           }}
         />
         <textarea
+          ref={input}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -246,7 +257,7 @@ export default function ChatPage() {
           }}
           placeholder={started ? "Describe another film…" : "Paste a URL, describe what you want, or attach a PDF/image below…"}
           rows={1}
-          className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent py-2 text-[15px] text-foreground placeholder:text-muted focus:outline-none"
+          className="max-h-[40vh] min-h-[2.5rem] flex-1 resize-none overflow-y-auto bg-transparent py-2 text-[15px] leading-6 text-foreground placeholder:text-muted focus:outline-none"
         />
         <button
           onClick={submit}
@@ -368,7 +379,7 @@ export default function ChatPage() {
           </div>
         </>
       ) : (
-        <div className="absolute left-1/2 top-3/4 z-10 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 px-4">
+        <div className="absolute bottom-[16%] left-1/2 z-10 w-full max-w-2xl -translate-x-1/2 px-4">
           <h1 className="mb-6 text-center font-display text-3xl font-normal drop-shadow-sm">What film do you want to make?</h1>
           {composer}
           <div className="mt-4 flex items-center justify-center gap-4 text-[11px] uppercase tracking-widest text-muted">

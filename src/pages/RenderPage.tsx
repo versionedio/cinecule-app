@@ -193,6 +193,27 @@ function anchorToElement(el: HTMLElement) {
   if (el.namespaceURI === "http://www.w3.org/2000/svg") el.style.transformBox = "fill-box";
 }
 
+// The measured box of a word spans the font's full ascent and descent, which on a tall font (Poppins, for one) reaches
+// well below the letters and, with tight line spacing, into the next line. Underlines are therefore placed from the
+// baseline: the box bottom minus the font's real descent is where the letters sit.
+const descentCache = new Map<string, number>();
+function descentOf(el: Element): number {
+  const view = el.ownerDocument.defaultView;
+  if (!view) return 0;
+  const cs = view.getComputedStyle(el);
+  const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  let d = descentCache.get(font);
+  if (d === undefined) {
+    const size = parseFloat(cs.fontSize) || 16;
+    const m = el.ownerDocument.createElement("canvas").getContext("2d");
+    if (m) m.font = font;
+    // fontBoundingBoxDescent is what the browser used to build the word box; fall back to a typical share of the size.
+    d = (m && m.measureText("Hxg").fontBoundingBoxDescent) || size * 0.25;
+    descentCache.set(font, d);
+  }
+  return d;
+}
+
 function applyEffect(layer: Layer, fx: ActiveEffect) {
   const doc = layer.frame.contentDocument;
   if (!doc?.body) return;
@@ -217,9 +238,14 @@ function applyEffect(layer: Layer, fx: ActiveEffect) {
       touch(layer, el);
       el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${layer.accent},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${layer.accent},${0.55 * e}))`;
       break;
-    case "underline":
-      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom + 4}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${layer.accent});opacity:${e};z-index:999;`));
+    case "underline": {
+      // Just below the letters (a little more for bigger type), never down in the next line.
+      const size = parseFloat(getComputedStyle(el).fontSize) || 40;
+      const gap = Math.max(5, size * 0.12);
+      const descent = descentOf(el);
+      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom - descent + gap}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${layer.accent});opacity:${e};z-index:999;`));
       break;
+    }
     case "circle":
       rects.forEach((q) => overlay(doc, `${boxOf(q, 18)}border:5px solid rgb(${layer.accent});border-radius:${q.width > q.height * 3 ? "999px" : "50%"};opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
