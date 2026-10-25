@@ -1,5 +1,7 @@
 import { ContentSource, ENTITY_NAMES, ProjectStatus } from "@/config/entities";
 import { entityService } from "./entityService";
+import { updateRecord } from "@/services/secureWriteService";
+import { nameProject } from "@/services/namingService";
 
 // URL fetch (20s cap) plus an AI research pass for query sources fits well inside this.
 export const INGEST_TIMEOUT_MS = 120_000;
@@ -60,6 +62,8 @@ export async function waitForSourcesProcessed(projectId: string, opts: WaitOptio
 /** Waits for ingestion, then moves the project into the generation pipeline exactly once. */
 export async function startPipeline(projectId: string, opts: WaitOptions = {}) {
   await waitForSourcesProcessed(projectId, opts);
+  // Now that links and files have been read, the title can be written from what they actually say.
+  nameProject(projectId);
   const next: ProjectStatus = "generating_content";
-  await entityService.update(ENTITY_NAMES.project, projectId, { status: next });
+  await updateRecord(ENTITY_NAMES.project, projectId, { status: next });
 }

@@ -88,6 +88,39 @@ export const PICTURE_AMOUNTS: Choice[] = [
   { id: "many", label: "Plenty", description: "About one scene in three" }
 ];
 
+/**
+ * How long the film runs. A film's length is the sum of its scenes' durations, and the narrator has to finish inside
+ * each scene, so a target length is really three numbers: how many scenes, how long each lasts, and how many words the
+ * narration of each may have. They are fixed here so the AI is told exact figures instead of a vague "about 30 seconds".
+ */
+export interface LengthChoice extends Choice {
+  seconds: number;
+  scenes: number;
+  /** Seconds per scene; scenes * each === seconds. */
+  each: number;
+}
+// Spoken narration runs at roughly 2.5 words a second; 2.2 leaves a little room so a line never spills into the next scene.
+export const WORDS_PER_SECOND = 2.2;
+export const LENGTHS: LengthChoice[] = [
+  { id: "30", label: "30 seconds", description: "Short and punchy: 6 scenes of 5 seconds. The length of a TikTok or Reels ad", seconds: 30, scenes: 6, each: 5 },
+  { id: "45", label: "45 seconds", description: "9 scenes of 5 seconds", seconds: 45, scenes: 9, each: 5 },
+  { id: "60", label: "1 minute", description: "10 scenes of 6 seconds", seconds: 60, scenes: 10, each: 6 },
+  { id: "90", label: "90 seconds", description: "10 scenes of 9 seconds", seconds: 90, scenes: 10, each: 9 }
+];
+
+/** The shape of the picture. Vertical is for TikTok, Reels and Shorts. */
+export interface FormatChoice extends Choice {
+  /** The project's canvas_aspect_ratio. */
+  ratio: "16:9" | "9:16" | "1:1";
+  width: number;
+  height: number;
+}
+export const FORMATS: FormatChoice[] = [
+  { id: "wide", label: "Wide 16:9", description: "Landscape, for YouTube, websites and presentations", ratio: "16:9", width: 1920, height: 1080 },
+  { id: "vertical", label: "Vertical 9:16", description: "Portrait, for TikTok, Reels and Shorts", ratio: "9:16", width: 1080, height: 1920 },
+  { id: "square", label: "Square 1:1", description: "Square, for feeds", ratio: "1:1", width: 1080, height: 1080 }
+];
+
 /** What the viewer chose before the film was made; every field may be "decide" (left to the AI). */
 export interface DesignChoices {
   theme: string;
@@ -95,8 +128,15 @@ export interface DesignChoices {
   font: string;
   layout: string;
   pictures: string;
+  /** "decide" or one of LENGTHS. */
+  length: string;
+  /** One of FORMATS ("wide" unless chosen). */
+  format: string;
 }
-export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide" };
+export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide" };
+
+/** The canvas the chosen format asks for. */
+export const formatOf = (id: string): FormatChoice => FORMATS.find((f) => f.id === id) ?? FORMATS[0];
 
 /**
  * The choices as plain text for the storyboard step (saved on the project). The storyboard prompt tells the
@@ -109,6 +149,22 @@ export function designChoicesText(c: DesignChoices): string {
   if (c.font !== "theme") lines.push(`- Font style: ${c.font} (use data-font="${c.font}" on every scene)`);
   if (c.layout !== "balanced") lines.push(`- Layout mix: ${c.layout} (${LAYOUT_MIXES.find((m) => m.id === c.layout)?.description ?? ""})`);
   if (c.pictures !== "decide") lines.push(`- Picture scenes: ${c.pictures} (${PICTURE_AMOUNTS.find((m) => m.id === c.pictures)?.description ?? ""})`);
+  const len = LENGTHS.find((l) => l.id === c.length);
+  if (len) {
+    const words = Math.floor(len.each * WORDS_PER_SECOND);
+    lines.push(
+      `- Length: the finished film runs exactly ${len.seconds} seconds. Write exactly ${len.scenes} scenes (scene 1 is the title, the last scene is the closing), ` +
+        `each with "duration": ${len.each}, so the durations add up to ${len.seconds}. Each scene's narration_text is AT MOST ${words} words ` +
+        `(about ${WORDS_PER_SECOND} spoken words a second), so the narrator finishes inside the scene instead of running into the next. ` +
+        `Count the words of every narration_text before you answer and shorten any that is over. Keep the story whole: a hook, one idea per scene, a close.`
+    );
+  }
+  const fmt = formatOf(c.format);
+  if (fmt.id === "vertical") {
+    lines.push(`- Format: vertical 9:16 for TikTok, Reels and Shorts. The screen is narrow, so headings are at most 5 words and each card or column at most 6 words.`);
+  } else if (fmt.id === "square") {
+    lines.push(`- Format: square 1:1. Keep headings at most 6 words and each card or column at most 7 words.`);
+  }
   return lines.length ? `DESIGN CHOICES FROM THE USER (follow exactly; anything not listed is yours to decide):\n${lines.join("\n")}` : "";
 }
 
@@ -152,6 +208,31 @@ const BASE_CSS = `
 .cc-closing .cc-h{font-size:118px}
 .cc-closing::after{content:"";width:220px;height:12px;border-radius:6px;background:var(--accent)}
 .cc-picture{padding:0}
+/* Square and vertical canvases (1080 wide): tighter padding, smaller type, columns stacked. */
+@media (max-aspect-ratio:1/1){
+.cc{padding:110px 80px;gap:36px;font-size:54px}
+.cc-h{font-size:96px;max-width:none}
+.cc-sub{font-size:52px;max-width:none}
+.cc-card{font-size:58px;max-width:none;padding:28px 38px}
+.cc-label{font-size:36px}
+.cc-title .cc-h{font-size:124px}
+.cc-points .cc-h{font-size:92px}
+.cc-num{font-size:290px}
+.cc-cap{font-size:62px;max-width:none}
+.cc-split .cc-h{font-size:86px}
+.cc-cols{grid-template-columns:1fr;gap:30px}
+.cc-col{font-size:56px;padding:32px 38px}
+.cc-quote::before{font-size:260px;height:110px}
+.cc-q{font-size:78px;max-width:none}
+.cc-by{font-size:46px}
+.cc-closing .cc-h{font-size:112px}
+.cc-picture{padding:0}
+}
+/* Vertical only: keep words clear of the caption and buttons TikTok, Reels and Shorts draw over the bottom and right. */
+@media (max-aspect-ratio:3/4){
+.cc{padding:220px 150px 400px 80px}
+.cc-picture{padding:0}
+}
 `;
 
 const fontOverrideCss = FONT_STYLES.filter((f) => f.head)

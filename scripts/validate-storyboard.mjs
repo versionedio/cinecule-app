@@ -1,13 +1,13 @@
 // Checks an AI-written storyboard against the rules in the storyboard prompt (design system, text limits,
 // scene mix). Use it on the first real outputs to see how well the model follows the prompt.
-//   node scripts/validate-storyboard.mjs slides.json [--pictures none|few|many] [--theme forest] [--bg glow] [--font editorial]
+//   node scripts/validate-storyboard.mjs slides.json [--pictures none|few|many] [--theme forest] [--bg glow] [--font editorial] [--length 30|45|60|90] [--format vertical|square]
 // slides.json is the slides_json array (or the JSON string the model returned) as saved by the storyboard step.
 import fs from "node:fs";
 import { chromium } from "playwright";
 
 const arg = (name) => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined; };
 const file = process.argv[2];
-if (!file || file.startsWith("--")) { console.error("usage: node scripts/validate-storyboard.mjs slides.json [--pictures none|few|many] [--theme x] [--bg x] [--font x]"); process.exit(2); }
+if (!file || file.startsWith("--")) { console.error("usage: node scripts/validate-storyboard.mjs slides.json [--pictures none|few|many] [--theme x] [--bg x] [--font x] [--length 30|45|60|90] [--format vertical|square]"); process.exit(2); }
 
 const THEMES = ["midnight", "ember", "forest", "ocean", "paper", "slate", "plum"];
 const BGS = ["plain", "gradient", "glow"];
@@ -92,6 +92,36 @@ if (want === "none" && pics) issues.push(`film: ${pics} picture scene(s) but the
 if (want === "few" && pics > Math.ceil(info.length / 3)) issues.push(`film: ${pics} picture scenes is more than "a few" for ${info.length} scenes`);
 if (want === "many" && pics < Math.floor(info.length / 5)) issues.push(`film: only ${pics} picture scene(s) but the user chose plenty`);
 for (const [k, v] of [["theme", arg("theme")], ["bg", arg("bg")], ["font", arg("font")]]) if (v && !info.every((x) => (k === "font" ? x.font : x[k]) === v)) issues.push(`film: the user chose ${k}=${v} but not every scene uses it`);
+
+// A chosen length is three exact numbers (same table as LENGTHS in src/render/theme.ts): the scene count, how long each
+// scene lasts, and how many words its narration may have, so the narrator finishes inside the scene.
+const LENGTHS = { "30": { scenes: 6, each: 5 }, "45": { scenes: 9, each: 5 }, "60": { scenes: 10, each: 6 }, "90": { scenes: 10, each: 9 } };
+const WORDS_PER_SECOND = 2.2;
+const lengthWanted = arg("length");
+if (lengthWanted) {
+  const L = LENGTHS[lengthWanted];
+  if (!L) issues.push(`film: --length must be one of ${Object.keys(LENGTHS).join(", ")}`);
+  else {
+    const total = slides.reduce((t, sl) => t + (Number(sl.duration) || 0), 0);
+    if (slides.length !== L.scenes) issues.push(`film: ${slides.length} scenes, but a ${lengthWanted}-second film has exactly ${L.scenes}`);
+    if (total !== Number(lengthWanted)) issues.push(`film: the durations add up to ${total}s, not ${lengthWanted}s`);
+    const maxWords = Math.floor(L.each * WORDS_PER_SECOND);
+    slides.forEach((sl, i) => {
+      if (Number(sl.duration) !== L.each) bad(i, `duration is ${sl.duration}s, expected ${L.each}s`);
+      const w = words(String(sl.narration_text ?? ""));
+      if (w > maxWords) bad(i, `narration has ${w} words, more than the ${maxWords} that fit in ${L.each}s`);
+    });
+  }
+}
+// Narrow canvases leave less room for text.
+const shape = arg("format");
+if (shape === "vertical" || shape === "square") {
+  const maxHead = shape === "vertical" ? 5 : 6, maxCard = shape === "vertical" ? 6 : 7;
+  info.forEach((x, i) => {
+    x.headings.forEach((h) => x.layout !== "cc-quote" && words(h) > maxHead && bad(i, `heading has ${words(h)} words (max ${maxHead} on a ${shape} canvas): "${h}"`));
+    x.cards.forEach((c) => words(c) > maxCard && bad(i, `card/column has ${words(c)} words (max ${maxCard} on a ${shape} canvas): "${c}"`));
+  });
+}
 
 console.log(`${slides.length} scenes | theme ${[...themes].join("/")} | layouts: ${info.map((x) => (x.layout ?? "?").replace("cc-", "")).join(", ")} | pictures: ${pics}`);
 if (issues.length === 0) console.log("OK: the storyboard follows every rule.");
