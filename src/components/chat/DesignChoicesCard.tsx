@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Play } from "lucide-react";
 import { BACKGROUNDS, DesignChoices, FONT_STYLES, FORMATS, LAYOUT_MIXES, LENGTHS, NO_CHOICES, PICTURE_AMOUNTS, THEMES } from "@/render/theme";
 import DesignPreview from "@/components/chat/DesignPreview";
@@ -39,9 +39,29 @@ export default function DesignChoicesCard({ onSubmit, onSkip, busy }: { onSubmit
   const [c, setC] = useState<DesignChoices>(NO_CHOICES);
   const set = (patch: Partial<DesignChoices>) => setC((prev) => ({ ...prev, ...patch }));
 
+  // The example sits at the top of the card. If a choice is made further down while it is out of view, bring it
+  // back into view so the change is visible straight away (nothing floats over the options).
+  const previewBox = useRef<HTMLDivElement>(null);
+  const firstRun = useRef(true);
+  useEffect(() => {
+    const el = previewBox.current;
+    if (!el) return;
+    if (firstRun.current) {
+      // When the card first appears the chat has scrolled to the bottom (the card is taller than the screen), which
+      // leaves the example out of view. Show it first; that also stops the chat from auto-scrolling past it.
+      firstRun.current = false;
+      const t = window.setTimeout(() => el.scrollIntoView({ block: "start", behavior: "smooth" }), 650);
+      return () => window.clearTimeout(t);
+    }
+    const r = el.getBoundingClientRect();
+    if (r.top < 70 || r.bottom > window.innerHeight - 10) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [c]);
+
   return (
     <div className="chat-in mt-3 space-y-4" style={{ animationDelay: "500ms" }}>
-      <DesignPreview choices={c} />
+      <div ref={previewBox} className="scroll-mt-28">
+        <DesignPreview choices={c} />
+      </div>
 
       <Group label="Theme">
         <Chip selected={c.theme === "decide"} onClick={() => set({ theme: "decide" })} title="The AI picks a theme that suits the topic">You decide</Chip>

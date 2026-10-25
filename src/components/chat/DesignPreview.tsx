@@ -85,7 +85,7 @@ export default function DesignPreview({ choices }: { choices: DesignChoices }) {
   useEffect(show);
 
   return (
-    <div className="sticky top-2 z-10 rounded-xl border border-white/15 bg-black/70 p-2 backdrop-blur-md">
+    <div className="mx-auto w-full max-w-[420px] rounded-xl border border-white/15 bg-black/40 p-2">
       <div
         ref={box}
         className="relative mx-auto w-full overflow-hidden rounded-lg border border-white/10"
