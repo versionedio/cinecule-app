@@ -7,8 +7,9 @@ import { ENTITY_NAMES, ExportAsset, GeneratedHtml, Project, ProjectStatus } from
 import RenderProgress from "@/components/common/RenderProgress";
 import { AssistantBubble, Typed, TypingDots } from "@/components/chat/Bubbles";
 import DesignChoicesCard from "@/components/chat/DesignChoicesCard";
-import { DesignChoices, designChoicesText } from "@/render/theme";
+import { DesignChoices, designChoicesText, formatOf } from "@/render/theme";
 import { Button } from "@/components/ui/button";
+import { updateRecord } from "@/services/secureWriteService";
 
 const POLL_MS = 2500;
 // Where each status sits in the pipeline; "failed" and "archived" sit outside it.
@@ -124,7 +125,7 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
   const setStatus = async (next: ProjectStatus) => {
     setError("");
     try {
-      await entityService.update(ENTITY_NAMES.project, projectId, { status: next });
+      await updateRecord(ENTITY_NAMES.project, projectId, { status: next });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed.");
@@ -136,7 +137,11 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
     setSavingDesign(true);
     const text = choices ? designChoicesText(choices) : "";
     try {
-      if (text) await entityService.update(ENTITY_NAMES.project, projectId, { article_content: text });
+      // The shape of the picture is a field on the project, so the renderer and the storyboard step both see it.
+      const patch: Record<string, unknown> = {};
+      if (text) patch.article_content = text;
+      if (choices) patch.canvas_aspect_ratio = formatOf(choices.format).ratio;
+      if (Object.keys(patch).length) await updateRecord(ENTITY_NAMES.project, projectId, patch);
     } catch (e) {
       console.warn("[chat] couldn't save the design choices; the film will be styled automatically", e);
     }

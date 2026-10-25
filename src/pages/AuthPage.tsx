@@ -32,7 +32,7 @@ export default function AuthPage() {
         await login(email, pwd);
       } else if (mode === "register") {
         await register(email, pwd, fn, ln);
-        setNotice("Account created. Check your email for a verification link, then sign in.");
+        setNotice("Request received. Check your email for a verification link, then sign in. Your account will be reviewed, and you'll be let in as soon as it's approved.");
         setMode("login");
       } else {
         await forgotPassword(email);
@@ -78,6 +78,12 @@ export default function AuthPage() {
           {notice && <Alert severity="success">{notice}</Alert>}
 
           {mode === "register" && (
+            <p className="rounded-[4px] border border-border bg-surface-raised px-3 py-2.5 text-sm leading-relaxed text-muted">
+              Cinecule is invite-only while it's in early access. Create your account to join the waiting list. You can sign
+              in right away, and you'll be let in once it's approved.
+            </p>
+          )}
+          {mode === "register" && (
             <div className="flex gap-3">
               <Field label="First name">
                 <Input value={fn} onChange={(e) => setFn(e.target.value)} />
@@ -102,7 +108,7 @@ export default function AuthPage() {
           )}
 
           <Button size="lg" disabled={busy} onClick={submit}>
-            {mode === "login" ? "Sign in" : mode === "register" ? "Create account" : "Send reset email"}
+            {mode === "login" ? "Sign in" : mode === "register" ? "Request access" : "Send reset email"}
           </Button>
 
           <div className="flex justify-between text-sm">
@@ -113,7 +119,7 @@ export default function AuthPage() {
             ) : (
               <>
                 <button className="text-primary-text hover:underline" onClick={() => setMode("register")}>
-                  Create account
+                  Request access
                 </button>
                 <button className="text-primary-text hover:underline" onClick={() => setMode("forgot")}>
                   Forgot password?

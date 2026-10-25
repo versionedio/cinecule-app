@@ -1,6 +1,8 @@
 import { entityService } from "@/services/entityService";
 import { uploadEntityFile } from "@/services/uploadService";
 import { ContentSourceType, ENTITY_NAMES, Project } from "@/config/entities";
+import { createRecord, deleteRecord, deleteRecords } from "@/services/secureWriteService";
+import { nameProject } from "@/services/namingService";
 
 // Finds a URL anywhere in the message, not just when the whole message is
 // nothing but a URL — a bare "https://site.com" and "https://site.com make
@@ -39,7 +41,9 @@ export async function createProjectFromInput(text: string, files: File[]): Promi
   // e.g. "make it feel like a lobby ad" — kept as its own query source
   // rather than dropped or left glued to the URL.
   const instructionText = extractedUrl ? trimmed.replace(extractedUrl, "").trim() : trimmed;
-  const name = trimmed ? trimmed.slice(0, 60) : (files[0]?.name.replace(/\.[^.]+$/, "") ?? "Untitled project");
+  // A plain placeholder for the moment; the AI writes the real title from the material (see nameProject below).
+  // A lone file is named after the file, which is a fair title until then.
+  const name = trimmed ? "New film" : (files[0]?.name.replace(/\.[^.]+$/, "") ?? "New film");
 
   const sourceBodies: Record<string, unknown>[] = [];
   for (const file of files) {
@@ -64,7 +68,7 @@ export async function createProjectFromInput(text: string, files: File[]): Promi
   if (extractedUrl) sourceBodies.push({ source_type: "url", url: extractedUrl, status: "draft" });
   if (instructionText) sourceBodies.push({ source_type: "query", raw_text: instructionText, status: "draft" });
 
-  const project = await entityService.create<Project>(ENTITY_NAMES.project, {
+  const project = await createRecord<Project>(ENTITY_NAMES.project, {
     name,
     video_type: "marketing",
     canvas_aspect_ratio: "16:9",
@@ -74,16 +78,18 @@ export async function createProjectFromInput(text: string, files: File[]): Promi
   const createdSourceIds: string[] = [];
   try {
     for (const body of sourceBodies) {
-      const source = await entityService.create<{ id: string }>(ENTITY_NAMES.contentSource, { project_id: project.id, ...body });
+      const source = await createRecord<{ id: string }>(ENTITY_NAMES.contentSource, { project_id: project.id, ...body });
       createdSourceIds.push(source.id);
     }
   } catch (e) {
     await Promise.allSettled([
-      ...createdSourceIds.map((sid) => entityService.remove(ENTITY_NAMES.contentSource, sid)),
-      entityService.remove(ENTITY_NAMES.project, project.id)
+      deleteRecords(ENTITY_NAMES.contentSource, createdSourceIds),
+      deleteRecord(ENTITY_NAMES.project, project.id)
     ]);
     throw e;
   }
+  // Title it from what was just given. It runs in the background and is done again once the sources have been read.
+  nameProject(project.id);
   return project;
 }
 
@@ -115,11 +121,8 @@ export async function deleteProject(projectId: string): Promise<{ leftBehind: nu
     } catch {
       continue; // an entity this account can't list has nothing it could delete either
     }
-    for (let i = 0; i < rows.length; i += 6) {
-      const results = await Promise.allSettled(rows.slice(i, i + 6).map((r) => entityService.remove(entity, r.id)));
-      leftBehind += results.filter((r) => r.status === "rejected").length;
-    }
+    leftBehind += await deleteRecords(entity, rows.map((r) => r.id));
   }
-  await entityService.remove(ENTITY_NAMES.project, projectId);
+  await deleteRecord(ENTITY_NAMES.project, projectId);
   return { leftBehind };
 }

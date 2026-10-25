@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Play } from "lucide-react";
-import { BACKGROUNDS, DesignChoices, FONT_STYLES, LAYOUT_MIXES, NO_CHOICES, PICTURE_AMOUNTS, THEMES } from "@/render/theme";
+import { BACKGROUNDS, DesignChoices, FONT_STYLES, FORMATS, LAYOUT_MIXES, LENGTHS, NO_CHOICES, PICTURE_AMOUNTS, THEMES } from "@/render/theme";
 import DesignPreview from "@/components/chat/DesignPreview";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -79,6 +79,19 @@ export default function DesignChoicesCard({ onSubmit, onSkip, busy }: { onSubmit
         <Chip selected={c.pictures === "decide"} onClick={() => set({ pictures: "decide" })}>You decide</Chip>
         {PICTURE_AMOUNTS.map((m) => (
           <Chip key={m.id} selected={c.pictures === m.id} onClick={() => set({ pictures: m.id })} title={m.description}>{m.label}</Chip>
+        ))}
+      </Group>
+
+      <Group label="Length">
+        <Chip selected={c.length === "decide"} onClick={() => set({ length: "decide" })} title="The AI picks a length that suits the topic">You decide</Chip>
+        {LENGTHS.map((l) => (
+          <Chip key={l.id} selected={c.length === l.id} onClick={() => set({ length: l.id })} title={l.description}>{l.label}</Chip>
+        ))}
+      </Group>
+
+      <Group label="Format">
+        {FORMATS.map((f) => (
+          <Chip key={f.id} selected={c.format === f.id} onClick={() => set({ format: f.id })} title={f.description}>{f.label}</Chip>
         ))}
       </Group>
 

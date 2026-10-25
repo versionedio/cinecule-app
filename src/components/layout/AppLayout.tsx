@@ -1,6 +1,6 @@
 import { ReactNode, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Clapperboard, LayoutDashboard, LogOut, Menu, User, X } from "lucide-react";
+import { Clapperboard, LayoutDashboard, LogOut, Menu, ShieldCheck, User, X } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { useAuth } from "@/hooks/useAuth";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -12,11 +12,13 @@ const NAV = [
   { path: "/projects", label: "Projects", icon: Clapperboard },
   { path: "/profile", label: "Profile", icon: User }
 ];
+const ADMIN_NAV = { path: "/admin", label: "Access", icon: ShieldCheck };
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
+  const items = isAdmin ? [...NAV, ADMIN_NAV] : NAV;
 
   return (
     <div className="flex h-full flex-col">
@@ -26,7 +28,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </div>
       <div className="hr" />
       <nav className="flex-1 space-y-1 p-2.5">
-        {NAV.map((item) => {
+        {items.map((item) => {
           const active = location.pathname === item.path;
           const Icon = item.icon;
           return (

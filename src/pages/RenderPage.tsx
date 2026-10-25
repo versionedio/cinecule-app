@@ -81,7 +81,7 @@ interface Layer {
   timing: SlideTiming;
   index: number;
   root: HTMLDivElement;
-  // Slow always-on drift underneath everything, so no scene is ever frozen.
+  // A wrapper kept still. (It once carried a slow whole-scene drift that made every word and picture creep.)
   ambient: HTMLDivElement;
   camera: HTMLDivElement;
   frame: HTMLIFrameElement;
@@ -388,22 +388,15 @@ function findBlocks(doc: Document, width: number, height: number): HTMLElement[]
 function poseLayer(layer: Layer, local: number, width: number, height: number, flat = false) {
   layer.camera.style.transform = flat ? "none" : cameraTransform(cameraAt(layer.plan.shots, local), width, height);
 
-  // Slow drift: alternate scenes push in and pull out, with a small sideways glide. Small enough to
-  // stay inside the slide's padding, so it can never crop content.
-  const total = Math.max(1, layer.timing.end - layer.timing.start);
-  const p = clamp(local / total, 0, 1);
-  const dir = layer.hero || layer.index % 2 === 0 ? 1 : -1;
-  const amp = layer.hero ? 0.09 : 0.04; // a picture scene has nothing to crop, so it can push in further
-  const scale = dir > 0 ? 1 + amp * p : 1 + amp - amp * p;
-  const glideX = (layer.index % 3 === 0 ? -1 : 1) * 0.012 * width * (p - 0.5);
-  const glideY = (layer.index % 2 === 0 ? 1 : -1) * 0.006 * height * (p - 0.5);
-  layer.ambient.style.transform = flat ? "none" : `translate(${glideX.toFixed(2)}px, ${glideY.toFixed(2)}px) scale(${scale.toFixed(4)})`;
+  // Nothing drifts on its own. Words and pictures hold perfectly still unless the director plans a move (the camera
+  // shots above) or a cue lands on them. Only the drawn icons idle, further down.
+  layer.ambient.style.transform = "none";
 
   resetEffects(layer);
   // Picture: the icon is drawn on stroke by stroke, then idles gently.
   for (const { el, start, shapes, photo } of layer.arts) {
     if (photo) {
-      // A picture fades in and then holds still; the slow push of the whole scene gives it life.
+      // A picture fades in and then holds perfectly still.
       el.style.opacity = easeOut(clamp((local - start) / 1.0, 0, 1)).toFixed(3);
       continue;
     }
@@ -467,6 +460,9 @@ export default function RenderPage() {
 
     const ready = (async (): Promise<RenderInfo> => {
       const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient", params.get("font") ?? "theme") : FIXTURE) : await loadData(id)), photos: await loadPhotos() };
+      // The built-in sample film can be shown in another shape (?aspect=9:16 or 1:1), to judge the vertical and square styles.
+      const shape = params.get("aspect");
+      if (id === "fixture" && (shape === "9:16" || shape === "1:1")) data.project = { ...data.project, canvas_aspect_ratio: shape };
       const { width, height } = canvasSize(data.project);
       const { timings, duration: total } = buildSlideTimings(data.slides);
       if (timings.length === 0) throw new Error("This project has no slides to render.");

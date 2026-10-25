@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DEFAULT_THEME, DesignChoices, themeHead } from "@/render/theme";
+import { DEFAULT_THEME, DesignChoices, formatOf, themeHead } from "@/render/theme";
 import { cn } from "@/lib/utils";
 
 interface Sample {
@@ -60,18 +60,20 @@ export default function DesignPreview({ choices }: { choices: DesignChoices }) {
     [html]
   );
 
+  // The example is drawn at the chosen shape, so a vertical film is previewed as a tall frame.
+  const fmt = formatOf(choices.format);
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(0.3);
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    const measure = () => setScale(el.clientWidth / 1920);
+    const measure = () => setScale(el.clientWidth / fmt.width);
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [fmt.width]);
 
   // Show only the chosen example; switching tabs changes visibility without reloading the frame.
   const show = () => {
@@ -84,14 +86,18 @@ export default function DesignPreview({ choices }: { choices: DesignChoices }) {
 
   return (
     <div className="sticky top-2 z-10 rounded-xl border border-white/15 bg-black/70 p-2 backdrop-blur-md">
-      <div ref={box} className="relative aspect-video w-full overflow-hidden rounded-lg border border-white/10">
+      <div
+        ref={box}
+        className="relative mx-auto w-full overflow-hidden rounded-lg border border-white/10"
+        style={{ aspectRatio: `${fmt.width} / ${fmt.height}`, maxWidth: fmt.width < fmt.height ? 180 : undefined }}
+      >
         <iframe
           ref={frame}
           title="Example of the chosen look"
           srcDoc={srcDoc}
           onLoad={show}
           className="absolute left-0 top-0 border-0"
-          style={{ width: 1920, height: 1080, transform: `scale(${scale})`, transformOrigin: "0 0" }}
+          style={{ width: fmt.width, height: fmt.height, transform: `scale(${scale})`, transformOrigin: "0 0" }}
         />
       </div>
       <div className="mt-2 flex items-center justify-between gap-2">

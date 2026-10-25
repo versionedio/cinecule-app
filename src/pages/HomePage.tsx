@@ -83,7 +83,7 @@ export default function HomePage() {
               Sign in
             </Button>
             <Button size="sm" onClick={() => navigate("/login?mode=register")}>
-              Get started
+              Request access
             </Button>
           </div>
         </div>
@@ -121,7 +121,7 @@ export default function HomePage() {
             style={{ animationDelay: "180ms" }}
           >
             <Button size="lg" onClick={() => navigate("/login?mode=register")}>
-              Start a project
+              Request access
               <ArrowRight className="h-4 w-4" />
             </Button>
             <Button size="lg" variant="outline" onClick={() => navigate("/login")}>
@@ -203,7 +203,7 @@ export default function HomePage() {
           <p className="mt-2 text-muted">Bring an article. Leave with a film.</p>
           <div className="mt-6">
             <Button size="lg" onClick={() => navigate("/login?mode=register")}>
-              Get started free
+              Request early access
               <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
