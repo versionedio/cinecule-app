@@ -141,6 +141,8 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
       const patch: Record<string, unknown> = {};
       if (text) patch.article_content = text;
       if (choices) patch.canvas_aspect_ratio = formatOf(choices.format).ratio;
+      // The chosen narrator is saved on the film; no choice leaves it blank, which means the standard voice.
+      if (choices && choices.voice !== "decide") patch.voice_id = choices.voice;
       if (Object.keys(patch).length) await updateRecord(ENTITY_NAMES.project, projectId, patch);
     } catch (e) {
       console.warn("[chat] couldn't save the design choices; the film will be styled automatically", e);
