@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { entityService } from "@/services/entityService";
 import { RotateCw } from "lucide-react";
-import { retryRender } from "@/services/renderService";
+import { latestRenders, retryRender, shapeName } from "@/services/renderService";
 import { Button } from "@/components/ui/button";
 import { ENTITY_NAMES, ExportAsset, GeneratedHtml } from "@/config/entities";
 import { Spinner } from "@/components/ui/spinner";
@@ -53,7 +53,11 @@ function formatRange(seconds: number): string {
 }
 
 interface Snapshot {
+  /** The render being shown: the one under way, else the next in line, else the newest. */
   asset: ExportAsset | null;
+  /** How many videos this render makes (one per chosen shape), and which of them `asset` is, counting from 1. */
+  total: number;
+  position: number;
   receivedAt: number;
   // When progress last moved, to tell a slow render from a stuck one.
   changedAt: number;
@@ -69,7 +73,7 @@ export default function RenderProgress({
   /** Called once when the render reaches "ready" or "failed", so the page can refresh the project. */
   onFinished?: () => void;
 }) {
-  const [snap, setSnap] = useState<Snapshot>(() => ({ asset: null, receivedAt: Date.now(), changedAt: Date.now() }));
+  const [snap, setSnap] = useState<Snapshot>(() => ({ asset: null, total: 0, position: 0, receivedAt: Date.now(), changedAt: Date.now() }));
   const [now, setNow] = useState(() => Date.now());
   const [videoSeconds, setVideoSeconds] = useState(0);
   const [hasPictures, setHasPictures] = useState(false);
@@ -95,16 +99,26 @@ export default function RenderProgress({
           controller.signal
         );
         if (cancelled) return;
-        // Record ids grow with time, so the highest id is the latest render.
-        const latest = (res.data ?? []).slice().sort((a, b) => (a.id < b.id ? 1 : -1))[0] ?? null;
+        // A film rendered in more than one shape has one render per shape, taken one after the other.
+        const batch = latestRenders(res.data ?? []);
+        const running = batch.find((a) => a.status === "processing");
+        const waiting = batch.filter((a) => a.status === "created");
+        const finishedOnes = batch.filter((a) => a.status === "ready" || a.status === "failed");
+        // Between two videos the next one is queued for a moment. That is progress, not a stuck queue, so it is
+        // shown as a render that is starting rather than as one waiting for a worker.
+        const latest: ExportAsset | null =
+          running ?? (waiting.length && finishedOnes.length ? { ...waiting[0], status: "processing", stage: "Getting the next video ready", progress_pct: 0, eta_sec: undefined } : waiting[0] ?? batch[batch.length - 1] ?? null);
+        const total = batch.length;
+        const position = latest ? batch.findIndex((a) => a.id === latest.id) + 1 : 0;
         setSnap((prev) => {
           const moved = !prev.asset || prev.asset.id !== latest?.id || prev.asset.progress_pct !== latest?.progress_pct || prev.asset.stage !== latest?.stage || prev.asset.status !== latest?.status;
           // The countdown runs from when the estimate last CHANGED. Resetting it on every poll would snap it
           // back up every few seconds while the estimate is unchanged.
           const sameEstimate = prev.asset?.id === latest?.id && prev.asset?.eta_sec === latest?.eta_sec && prev.asset?.stage === latest?.stage;
-          return { asset: latest, receivedAt: sameEstimate ? prev.receivedAt : Date.now(), changedAt: moved ? Date.now() : prev.changedAt };
+          return { asset: latest, total, position, receivedAt: sameEstimate ? prev.receivedAt : Date.now(), changedAt: moved ? Date.now() : prev.changedAt };
         });
-        if (latest && (latest.status === "ready" || latest.status === "failed") && !finished.current) {
+        // Done only when every video in the batch has finished.
+        if (total > 0 && finishedOnes.length === total && !finished.current) {
           finished.current = true;
           onFinishedRef.current?.();
         }
@@ -134,7 +148,7 @@ export default function RenderProgress({
       .listAll<GeneratedHtml>(ENTITY_NAMES.generatedHtml, { project_id: projectId })
       .then((slides) => {
         setVideoSeconds(slides.reduce((t, s) => t + (Number(s.duration) || 0), 0));
-        setHasPictures(slides.some((s) => /data-art\s*=\s*["']/.test(String(s.html_content ?? ""))));
+        setHasPictures(slides.some((s) => /data-(?:art|image-source)\s*=\s*["']/.test(String(s.html_content ?? ""))));
       })
       .catch(() => undefined);
   }, [projectId, compact]);
@@ -203,7 +217,9 @@ export default function RenderProgress({
     );
   }
 
-  const stage = asset?.stage || "Rendering";
+  // With several videos, say which one this is: "Rendering" -> "Rendering · Vertical 9:16 (2 of 2)".
+  const which = snap.total > 1 ? ` · ${shapeName(asset?.aspect_ratio) || "Video"} (${snap.position} of ${snap.total})` : "";
+  const stage = `${asset?.stage || "Rendering"}${which}`;
   const remaining = etaLeft == null ? "" : etaLeft < 2 ? "finishing up" : `${formatEta(etaLeft)} left`;
 
   const bar = (

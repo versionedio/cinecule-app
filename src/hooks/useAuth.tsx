@@ -64,18 +64,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Only an approved account can be an admin, so ask once the answer is in. The answer is remembered with the account it
-  // belongs to, so signing in as someone else never shows the previous person's answer while the new one is checked.
-  const approvedEmail = profile && access === "approved" ? profile.email : undefined;
+  // The admin answer is remembered with the account it belongs to, so signing in as someone else never shows the
+  // previous person's answer while the new one is checked. It is asked for as soon as the account is known, in
+  // parallel with the access check, so the Access link isn't waiting behind two requests in a row. Only a person
+  // who is not waiting can be an admin, and the backend enforces that regardless of what is shown here.
+  const email = profile?.email;
+  const checkingAdmin = Boolean(profile) && access !== "pending" && access !== "unknown";
   useEffect(() => {
-    if (!profile || access !== "approved") return;
+    if (!checkingAdmin) return;
     let cancelled = false;
-    void checkAdmin().then((yes) => !cancelled && setAdminResult({ email: profile.email, yes }));
+    void checkAdmin().then((yes) => !cancelled && setAdminResult({ email, yes }));
     return () => {
       cancelled = true;
     };
-  }, [profile, access]);
-  const isAdmin: boolean | null = access === "pending" ? false : approvedEmail !== undefined && adminResult?.email === approvedEmail ? adminResult.yes : null;
+  }, [checkingAdmin, email]);
+  const isAdmin: boolean | null = access === "pending" ? false : checkingAdmin && adminResult && adminResult.email === email ? adminResult.yes : null;
 
   // A request found the session unrecoverable (refresh failed after a 401).
   useEffect(() => {

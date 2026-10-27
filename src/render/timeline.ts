@@ -19,6 +19,20 @@ export interface RenderData {
   audio: { slide_id: string; words: WordTiming[] }[];
   /** Generated pictures by slide id (a path the render server serves); a picture scene uses its picture instead of icons. */
   photos?: Record<string, string>;
+  /** The viewer's own pictures by slide id, with how the render script decided each is shown. */
+  userImages?: Record<string, UserImage>;
+}
+
+/** How a viewer's own picture fills a scene: all of it, or cropped to its main subject. */
+export interface UserImage {
+  /** A path the render server serves. */
+  url: string;
+  treatment: "whole" | "focus";
+  /** The picture's width over its height. */
+  aspect: number;
+  /** For "focus": the part to show, as fractions of the picture. It has the frame's own shape. */
+  crop?: { x: number; y: number; w: number; h: number };
+  reason?: string;
 }
 
 export interface SlideTiming {
