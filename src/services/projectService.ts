@@ -3,6 +3,7 @@ import { uploadEntityFile } from "@/services/uploadService";
 import { ContentSourceType, ENTITY_NAMES, Project } from "@/config/entities";
 import { createRecord, deleteRecord, deleteRecords } from "@/services/secureWriteService";
 import { nameProject } from "@/services/namingService";
+import { imagePreviewBase64 } from "@/services/imagePreview";
 
 // Finds a URL anywhere in the message, not just when the whole message is
 // nothing but a URL — a bare "https://site.com" and "https://site.com make
@@ -49,6 +50,9 @@ export async function createProjectFromInput(text: string, files: File[]): Promi
   for (const file of files) {
     const sourceType = detectSourceType(file);
     if (sourceType === "pdf" || sourceType === "image") {
+      // An image is also read, so the film can use what it says: a small copy goes with the source and the backend has a
+      // vision model write down what it shows. Made first, so an image that can't be read stops here, before any upload.
+      const imagePreview = sourceType === "image" ? await imagePreviewBase64(file) : undefined;
       // contentsource.file_key is a "file" column: the backend validates the
       // declared contentType against an allow-list, so send the file's real
       // MIME type (application/pdf, image/png, ...), not a generic one.
@@ -57,8 +61,9 @@ export async function createProjectFromInput(text: string, files: File[]): Promi
         source_type: sourceType,
         title: file.name,
         file_key: s3Key,
-        // ingest needs a real fetchable URL for the image ai_call, not the bare S3 key file_key holds.
+        // The full-size picture's address, for showing it in the video.
         file_url: cdnUrl,
+        ...(imagePreview ? { image_preview: imagePreview } : {}),
         status: "draft"
       });
     } else {
