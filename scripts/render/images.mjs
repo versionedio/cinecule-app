@@ -1,26 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 /**
- * Real pictures for picture scenes, generated at render time.
+ * Pictures for a render: generated pictures for picture scenes, and the viewer's own pictures.
  *
- * A picture scene's slide carries `data-art="cat"` (what it is about) and optionally
- * `data-image="a fluffy orange kitten..."` (an exact description). For each such scene one image is
- * generated, saved next to the render, and shown instead of the line icons. Anything that goes wrong
- * (no key, plan limits, a failed generation) skips that scene, and the renderer falls back to its icons,
- * so a picture can never make a render fail.
+ * No provider key is used here, or anywhere on GitHub. Everything that needs one (writing the picture prompts,
+ * generating a picture, looking at a viewer's picture) is done by the `scene_images` glyph in nostackai, which reads the
+ * tenant's own Secrets. This file only talks to that glyph through the platform API, the same way the audio step does.
+ * Its source and settings are in glyphs/scene-images.cjs.
  *
- * Two providers are supported, chosen by which key is present (or IMAGE_PROVIDER=gemini|elevenlabs):
- *   - Gemini (GEMINI_API_KEY): one request, the image comes back inline. Needs billing enabled on the Google
- *     project; the free tier has no image quota.
- *   - ElevenLabs (ELEVENLABS_IMAGE_KEY): asynchronous (create, poll until completed, download, because the
- *     result link expires after about an hour). Needs a Pro plan.
- * Only the two small generate functions below are provider-specific.
+ * A picture that cannot be made FAILS THE RENDER, with a message saying which scene and why. There is no fallback to
+ * line icons or an empty frame: a video with a missing picture is worse than no video. The one thing that is not fatal is
+ * the model's advice on how to show a viewer's picture: if it can't be had, the picture is simply shown whole.
  */
 
-const API = "https://api.elevenlabs.io/v1/flows/image";
-const POLL_MS = 3000; // the API asks for at least 2 s between polls
-const MAX_WAIT_MS = 150_000;
+// Default id of the scene_images glyph; override with GLYPH_SCENE_IMAGES_ID if it is ever recreated.
+const SCENE_IMAGES_GLYPH_ID = process.env.GLYPH_SCENE_IMAGES_ID || "9b70e18c-59d8-4a7d-b31e-e743df0942eb";
 
 // An HTML attribute's value, whichever way the storyboard quoted it: name="x", name='x' or name = "x".
 const attr = (html, name) => {
@@ -28,29 +24,18 @@ const attr = (html, name) => {
   return (m?.[1] ?? m?.[2] ?? "").trim();
 };
 
-/** The picture scenes in a project: [{ slideId, subjects, prompt }]. */
-export function pictureScenes(slides, style) {
-  const scenes = [];
-  for (const slide of slides) {
-    const html = String(slide.html_content ?? "");
-    const subjects = attr(html, "data-art").split(",").map((s) => s.trim().replace(/-/g, " ")).filter(Boolean);
-    if (subjects.length === 0) continue;
-    const described = attr(html, "data-image");
-    const subject = subjects.join(" and ");
-    const prompt = described || `A beautiful photograph of ${/^[aeiou]/i.test(subject) ? "an" : "a"} ${subject}`;
-    scenes.push({
-      slideId: slide.id,
-      subjects,
-      narration: String(slide.narration_text ?? "").trim(),
-      described: Boolean(described), // the storyboard already gave an exact description; keep it
-      basePrompt: prompt,
-      prompt: `${prompt}. ${style}`
-    });
-  }
-  return scenes;
-}
+const themeOfHtml = (html) => String(html ?? "").match(/data-theme\s*=\s*(?:"([^"]*)"|'([^']*)')/)?.slice(1, 3).find(Boolean)?.trim().toLowerCase();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp" };
+
+/** Runs one action of the scene_images glyph and returns its result ({ ok, ... }). Throws only if the call itself failed. */
+async function callGlyph(api, input) {
+  const res = await api.post(`/glyphs/${SCENE_IMAGES_GLYPH_ID}/invoke`, { input });
+  const out = res?.result;
+  if (!out || typeof out !== "object") throw new Error("the scene_images glyph returned nothing");
+  return out;
+}
 
 /** fetch with a timeout, retrying the temporary failures (overloaded or unavailable: 500, 502, 503, 504). */
 async function fetchRetry(url, init, { tries = 4, timeoutMs = 90_000 } = {}) {
@@ -69,160 +54,69 @@ async function fetchRetry(url, init, { tries = 4, timeoutMs = 90_000 } = {}) {
   throw last;
 }
 
-async function createGeneration(apiKey, body) {
-  const res = await fetch(API, { method: "POST", headers: { "xi-api-key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`create ${res.status}: ${JSON.stringify(json.detail ?? json).slice(0, 300)}`);
-  if (!json.id) throw new Error(`create returned no id (keys: ${Object.keys(json).join(", ")})`);
-  return json.id;
-}
-
-async function waitForGeneration(apiKey, id) {
-  const deadline = Date.now() + MAX_WAIT_MS;
-  for (;;) {
-    await sleep(POLL_MS);
-    const res = await fetch(`${API}/${id}`, { headers: { "xi-api-key": apiKey } });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(`poll ${res.status}: ${JSON.stringify(json.detail ?? json).slice(0, 300)}`);
-    if (json.status === "completed") {
-      if (!json.content_url) throw new Error("completed without a content_url");
-      return json;
-    }
-    if (json.status === "failed") throw new Error(`generation failed: ${json.failure_reason ?? ""} ${json.error_message ?? ""}`.trim());
-    if (Date.now() > deadline) throw new Error(`still ${json.status} after ${MAX_WAIT_MS / 1000}s`);
-  }
-}
-
-const EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp" };
-
-async function generateWithElevenLabs({ apiKey, prompt, outBase, model, resolution, quality, aspectRatio }) {
-  const id = await createGeneration(apiKey, {
-    model_id: model,
-    prompt,
-    aspect_ratio: aspectRatio,
-    ...(resolution ? { resolution } : {}),
-    ...(quality ? { quality } : {})
+const runTool = (cmd, args) =>
+  new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    p.stdout.on("data", (d) => (out += d));
+    p.stderr.on("data", (d) => (err += d));
+    p.on("error", reject);
+    p.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`${cmd} failed (${code}): ${err.slice(-300)}`))));
   });
-  const done = await waitForGeneration(apiKey, id);
-  const img = await fetch(done.content_url);
-  if (!img.ok) throw new Error(`download ${img.status}`);
-  const file = `${outBase}${EXT[done.content_mime_type] ?? ".png"}`;
-  fs.writeFileSync(file, Buffer.from(await img.arrayBuffer()));
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Generated pictures for picture scenes
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The picture scenes in a project: [{ slideId, subjects, narration, described, basePrompt, prompt }]. */
+export function pictureScenes(slides, style) {
+  const scenes = [];
+  for (const slide of slides) {
+    const html = String(slide.html_content ?? "");
+    const subjects = attr(html, "data-art").split(",").map((s) => s.trim().replace(/-/g, " ")).filter(Boolean);
+    if (subjects.length === 0) continue;
+    const described = attr(html, "data-image");
+    const subject = subjects.join(" and ");
+    const prompt = described || `A clear, simple photograph of ${/^[aeiou]/i.test(subject) ? "an" : "a"} ${subject} on a plain background`;
+    scenes.push({
+      slideId: slide.id,
+      projectId: slide.project_id,
+      subjects,
+      narration: String(slide.narration_text ?? "").trim(),
+      described: Boolean(described), // the storyboard already gave an exact description; keep it
+      basePrompt: prompt,
+      prompt: `${prompt}. ${style}`
+    });
+  }
+  return scenes;
+}
+
+/** The picture the glyph made, fetched back from it in slices (it is too large for one response) and saved to `outBase`. */
+async function fetchGeneratedPicture(api, made, outBase) {
+  const parts = [];
+  for (let i = 0; i < made.chunks; i++) {
+    const chunk = await callGlyph(api, { action: "get_chunk", key: made.key, index: i });
+    if (!chunk.ok) throw new Error(`could not read the picture back (${chunk.error})`);
+    parts.push(Buffer.from(chunk.data_base64, "base64"));
+  }
+  const bytes = Buffer.concat(parts);
+  if (made.bytes && bytes.length !== made.bytes) throw new Error(`the picture came back incomplete (${bytes.length} of ${made.bytes} bytes)`);
+  const file = `${outBase}${EXT[made.mime] ?? ".png"}`;
+  fs.writeFileSync(file, bytes);
   return file;
 }
 
-async function generateWithGemini({ apiKey, prompt, outBase, model, resolution, aspectRatio, baseUrl }) {
-  const base = baseUrl || "https://generativelanguage.googleapis.com/v1beta";
-  // imageSize (1K/2K/4K) exists on the Gemini 3 image models only.
-  const imageConfig = { aspectRatio, ...(resolution && !/^gemini-2\.5/.test(model) ? { imageSize: resolution } : {}) };
-  const res = await fetchRetry(`${base}/models/${model}:generateContent`, {
-    method: "POST",
-    headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ["IMAGE"], imageConfig } })
-  }, { timeoutMs: 120_000 });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`gemini ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 240)}`);
-  const parts = (json.candidates ?? []).flatMap((c) => c.content?.parts ?? []);
-  const inline = parts.map((p) => p.inlineData ?? p.inline_data).find((x) => x?.data);
-  if (!inline) {
-    const why = json.promptFeedback?.blockReason ?? json.candidates?.[0]?.finishReason ?? "no image in the response";
-    throw new Error(`gemini returned no image (${why})`);
-  }
-  const file = `${outBase}${EXT[inline.mimeType ?? inline.mime_type] ?? ".png"}`;
-  fs.writeFileSync(file, Buffer.from(inline.data, "base64"));
-  return file;
-}
-
-/** Which provider and key to use, from the environment; null when neither key is set. */
-export function imageProvider(env = process.env) {
-  const wanted = env.IMAGE_PROVIDER;
-  if ((wanted === "gemini" || !wanted) && env.GEMINI_API_KEY) return { name: "gemini", apiKey: env.GEMINI_API_KEY, baseUrl: env.GEMINI_BASE_URL, model: env.IMAGE_MODEL || "gemini-3.1-flash-image", resolution: env.IMAGE_RESOLUTION || "2K" };
-  if ((wanted === "elevenlabs" || !wanted) && env.ELEVENLABS_IMAGE_KEY) return { name: "elevenlabs", apiKey: env.ELEVENLABS_IMAGE_KEY, model: env.IMAGE_MODEL || "gpt-image-2", resolution: env.IMAGE_RESOLUTION || "2K", quality: env.IMAGE_QUALITY || "medium" };
-  return null;
-}
-
-/** Generates one image with the chosen provider and saves it to `outBase` plus the right extension. */
-export async function generateImage({ provider, prompt, outBase, aspectRatio = "16:9" }) {
-  const args = { ...provider, prompt, outBase, aspectRatio };
-  return provider.name === "gemini" ? generateWithGemini(args) : generateWithElevenLabs(args);
-}
-
-// The colour mood each slide theme calls for, so a film's pictures sit well next to its slides.
-const THEME_MOOD = {
-  midnight: "deep midnight blues and dark tones with small warm golden highlights",
-  ember: "warm ember oranges, amber light and deep brown shadows, a dusk feel",
-  forest: "deep forest greens and soft natural daylight, earthy and fresh",
-  ocean: "teal and deep sea blues with clear, cool light",
-  paper: "warm cream and soft neutral tones, gentle diffused daylight, slightly muted and editorial",
-  slate: "cool grey-blue tones with clean, bright, even light",
-  plum: "rich plum purples and soft pinks with moody, glowing light"
-};
-const themeOfHtml = (html) => String(html ?? "").match(/data-theme\s*=\s*(?:"([^"]*)"|'([^']*)')/)?.slice(1, 3).find(Boolean)?.trim().toLowerCase();
-
-const DESCRIBE_INSTRUCTIONS = `You write the image prompt for ONE scene of a narrated video. The picture fills the screen while the narrator says the scene's narration, so it must clearly show what is being said at that moment.
-
-CHOOSING THE SUBJECT
-- If the narration is about something concrete (an animal, place, object, a person doing something), show that thing itself, literally.
-- If the narration is abstract (a process, idea, feature, feeling, lesson), show ONE concrete real-world scene or visual metaphor that stands for the idea. Never a literal picture of the words, and never a generic stock cliche.
-- Judge by THIS scene's narration, not the film's overall topic. Do not show something that is only mentioned in passing.
-
-BE SPECIFIC. Your prompt must contain, in one flowing paragraph of 45 to 75 words:
-1. ONE main subject, named precisely (species or object type, age, material, colour). Never "a thing", "something" or "a concept".
-2. What it is doing, or its state.
-3. A specific setting.
-4. The light and time of day.
-5. The camera: shot size, angle, and a lens feel (for example "low-angle medium shot, 85mm, shallow depth of field").
-6. The mood, leaning to the colour palette you are given.
-Use concrete nouns and adjectives. Avoid abstract words such as concept, innovation, synergy or journey. Show one subject, not a collage. Keep the subject near the centre with some calm space around it.
-Never include text, letters, numbers, logos, screens showing text, charts or user interfaces, and no recognisable real people.
-
-EXAMPLES
-Narration: "Retractable claws stay razor-sharp, and night vision works at one-sixth of the light a human needs."
-Prompt: A grey tabby cat crouched on a mossy garden wall at dusk, pupils wide and eyes glowing faint amber, one front paw lifted with claws just visible. Blurred hedge and an indigo evening sky behind it. Low-angle medium shot, 85mm lens, shallow depth of field. Quiet, alert mood in cool blue tones with a warm rim light.
-Narration: "The platform handled the data, the workflows and the storage, so I could focus on the product."
-Prompt: A tidy wooden workshop bench seen from slightly above, tools hung in neat rows on a pegboard and a half-finished wooden model resting in the centre of the bench. Soft morning light from a side window, fine sawdust in the air. Medium shot, 50mm lens, shallow depth of field. Calm, focused mood in warm natural tones.
-
-Reply with ONLY the prompt.`;
-
-const FILM_STYLE_INSTRUCTIONS = `You are the art director of a narrated video. From the film's outline and a colour mood, write ONE short visual style direction (25 to 40 words) that every picture in the film will share, so the pictures look like they belong together: the photographic approach, lens feel, kind of light, colour grading and overall feel. Do not describe any subject. No text in images. Reply with ONLY the direction.`;
-
-async function askGemini({ apiKey, baseUrl, model, system, user, maxOutputTokens = 1024, temperature = 0.6 }) {
-  const base = baseUrl || "https://generativelanguage.googleapis.com/v1beta";
-  const res = await fetchRetry(`${base}/models/${model}:generateContent`, {
-    method: "POST",
-    headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ parts: [{ text: user }] }], generationConfig: { temperature, maxOutputTokens } })
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`text model ${res.status}: ${String(json?.error?.message ?? JSON.stringify(json)).split("\n")[0].slice(0, 200)}`);
-  return (json.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim().replace(/^["'`]+|["'`]+$/g, "");
-}
-
-/** One visual style direction shared by every picture in the film, so they look related. */
-export async function describeFilmStyle({ apiKey, baseUrl, model, filmOutline, mood }) {
-  const text = await askGemini({ apiKey, baseUrl, model, system: FILM_STYLE_INSTRUCTIONS, user: `Film outline:\n${filmOutline}\n\nColour mood to follow: ${mood}\n\nWrite the visual style direction.`, maxOutputTokens: 600 });
-  if (text.length < 15) throw new Error("film style came back empty");
-  return text;
-}
-
-/** An image prompt written for one scene by a text model that reads the scene's own narration. */
-export async function describeScene({ apiKey, baseUrl, model, filmOutline, narration, sceneNumber, mood, filmStyle }) {
-  const user =
-    `The whole film, scene by scene (for context only):\n${filmOutline}\n\n` +
-    `Colour mood to lean towards: ${mood}\n` +
-    (filmStyle ? `Shared visual style for every picture in this film: ${filmStyle}\n` : "") +
-    `\nTHIS is scene ${sceneNumber}. Its narration:\n"${narration}"\n\nWrite the image prompt for this scene.`;
-  const text = await askGemini({ apiKey, baseUrl, model, system: DESCRIBE_INSTRUCTIONS, user });
-  if (text.length < 15) throw new Error("describe returned no usable prompt");
-  return text;
-}
+const sceneNumber = (slides, slideId) => slides.findIndex((sl) => sl.id === slideId) + 1;
 
 /**
- * One image per picture scene, in parallel. Returns { slideId: "/__gen/<file>" } for the scenes that worked.
- * Settings come from the environment: IMAGE_PROVIDER, IMAGE_MODEL, IMAGE_RESOLUTION, IMAGE_QUALITY, IMAGE_STYLE.
+ * One image per picture scene, in parallel. Returns { slideId: "/__gen/<file>" }, one for every picture scene, or throws
+ * naming the scenes whose picture could not be made (each is tried twice first).
+ * `api` is the platform client; it is required, since the glyph is what makes the pictures.
+ * `aspectRatio` is the shape of this render: "16:9", "9:16" or "1:1". IMAGE_STYLE is a plain (non-secret) style suffix.
  */
-export async function generateSceneImages({ slides, dir, log = console, env = process.env }) {
-  const style = env.IMAGE_STYLE || "Photorealistic, soft natural light, shallow depth of field, rich detail, no text, no watermark, no logos.";
+export async function generateSceneImages({ slides, dir, api, aspectRatio = "16:9", log = console, env = process.env }) {
+  const style = env.IMAGE_STYLE || "Clear, simple, realistic photograph with one subject, a plain uncluttered background and soft natural light. No text, no watermark, no logos.";
   const scenes = pictureScenes(slides, style);
   if (scenes.length === 0) {
     // Say so: a silent skip is what made missing pictures hard to diagnose.
@@ -230,52 +124,218 @@ export async function generateSceneImages({ slides, dir, log = console, env = pr
     log.log(`No picture scenes to generate (${slides.length} slides, ${marked} mention data-art).`);
     return {};
   }
-  const provider = imageProvider(env);
-  if (!provider) {
-    log.log(`Picture scenes found (${scenes.length}) but no image key is set; the icons will be used.`);
-    return {};
-  }
-  log.log(`Generating ${scenes.length} picture(s) with ${provider.name} (${provider.model}).`);
+  if (!api) throw new Error(`The film has ${scenes.length} picture scene(s), but there is no platform connection to make them.`);
+  log.log(`Generating ${scenes.length} picture(s) through the scene_images glyph (${aspectRatio}).`);
   fs.mkdirSync(dir, { recursive: true });
   const photos = {};
 
-  // A text model reads each scene's own narration and writes the picture description, so what is shown
-  // matches what is said. Needs a Gemini key; without one (or if it fails) the plain subject prompt is used.
-  const geminiKey = env.GEMINI_API_KEY;
-  const describeModel = env.DESCRIBE_MODEL || "gemini-flash-latest";
-  const filmOutline = slides.map((sl, i) => `${i + 1}. ${String(sl.narration_text ?? "").trim().slice(0, 220)}`).filter((l) => l.length > 4).join("\n");
-  // One style direction for the whole film (so the pictures look related), then one prompt per scene.
-  const filmTheme = slides.map((sl) => themeOfHtml(sl.html_content)).find(Boolean);
-  const mood = THEME_MOOD[filmTheme] ?? "natural, balanced colours with soft light";
-  let filmStyle = "";
-  if (geminiKey && scenes.some((sc) => !sc.described && sc.narration)) {
-    try {
-      filmStyle = await describeFilmStyle({ apiKey: geminiKey, baseUrl: env.GEMINI_BASE_URL, model: describeModel, filmOutline, mood });
-      log.log(`Visual style for the film (${filmTheme ?? "no theme"}): ${filmStyle}`);
-    } catch (e) {
-      log.warn(`Could not write a shared visual style; each picture is styled on its own. ${e?.message || e}`);
-    }
+  // The glyph's text model reads each scene's own narration and writes the picture description, so what is shown matches
+  // what is said. If that fails, the plain subject prompt is used.
+  let written = { style: "", prompts: {} };
+  try {
+    const outline = slides.map((sl, i) => `${i + 1}. ${String(sl.narration_text ?? "").trim().slice(0, 220)}`).filter((l) => l.length > 4).join("\n");
+    const theme = slides.map((sl) => themeOfHtml(sl.html_content)).find(Boolean);
+    const out = await callGlyph(api, {
+      action: "write_prompts",
+      outline,
+      theme,
+      scenes: scenes.map((sc) => ({ id: sc.slideId, number: slides.findIndex((sl) => sl.id === sc.slideId) + 1, narration: sc.narration, described: sc.described }))
+    });
+    if (out.ok) written = { style: out.style || "", prompts: out.prompts || {} };
+    else log.warn(`Could not write picture descriptions (${out.error}); using the plain subject.`);
+    if (written.style) log.log(`Visual style for the film: ${written.style}`);
+  } catch (e) {
+    log.warn(`Could not write picture descriptions; using the plain subject. ${e?.message || e}`);
   }
+
+  const failures = [];
+  await Promise.all(
+    scenes.map(async (scene) => {
+      const prompt = written.prompts[scene.slideId] ? `${written.prompts[scene.slideId]} ${style}` : scene.prompt;
+      log.log(`Prompt for ${scene.slideId} (${scene.subjects.join(", ")}): ${prompt}`);
+      let lastError = "";
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const made = await callGlyph(api, { action: "generate_image", id: `${scene.projectId || "film"}-${scene.slideId}`, prompt, aspect_ratio: aspectRatio });
+          if (!made.ok) throw new Error(made.error);
+          const file = await fetchGeneratedPicture(api, made, path.join(dir, scene.slideId));
+          photos[scene.slideId] = `/__gen/${path.basename(file)}`;
+          log.log(`Picture for ${scene.slideId} (${scene.subjects.join(", ")}): ${path.basename(file)}`);
+          return;
+        } catch (e) {
+          lastError = String(e?.message || e);
+          log.warn(`Picture for ${scene.slideId} (${scene.subjects.join(", ")}) failed, attempt ${attempt} of 2. ${lastError}`);
+          // A missing key or an unusable prompt will not be different the second time.
+          if (/no_key|bad prompt|bad id/.test(lastError)) break;
+        }
+      }
+      failures.push(`scene ${sceneNumber(slides, scene.slideId)} (${scene.subjects.join(" and ")}): ${lastError}`);
+    })
+  );
+  if (failures.length) throw new Error(`Could not make ${failures.length === 1 ? "a picture" : `${failures.length} pictures`}: ${failures.sort().join("; ")}`.slice(0, 380));
+  return photos;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The viewer's own pictures
+//
+// A scene whose root carries data-image-source="<contentsource id>" shows a picture the viewer attached. It is shown
+// either WHOLE (nothing cut off, on a blurred copy of itself where the shape differs from the frame) or CROPPED to its
+// main subject. A model that can see the picture, and knows what the narrator says over it, makes the call (the glyph's
+// `look` action); plain rules below then overrule it wherever cutting would lose something (screenshots, charts, text,
+// a subject that fills the frame, a crop that would have to be blown up too far). With no answer from the glyph, the
+// picture is simply shown whole.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// Only photographs and illustrations can lose their edges without losing meaning.
+const CROPPABLE = new Set(["photo", "illustration"]);
+const MAX_UPLOAD = 25 * 1024 * 1024;
+const MAX_UPSCALE = 2.5; // a crop blown up more than this (canvas pixels per source pixel) would look soft
+const MIN_GAIN = 0.8; // a crop that keeps more than this share of the picture is not worth making
+const MARGIN = 0.12; // breathing room around the subject, as a share of its size
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/** The scenes that show the viewer's own picture: [{ slideId, sourceId, narration }]. */
+export function userImageScenes(slides) {
+  const out = [];
+  for (const slide of slides) {
+    const sourceId = attr(String(slide.html_content ?? ""), "data-image-source");
+    if (sourceId) out.push({ slideId: slide.id, sourceId, narration: String(slide.narration_text ?? "").trim() });
+  }
+  return out;
+}
+
+/**
+ * The part of the picture to show: the subject box (fractions of the picture) plus breathing room, widened or heightened
+ * to the frame's shape and kept inside the picture. Returns fractions of the picture, plus the size in source pixels.
+ */
+export function cropRect({ width: W, height: H, box, canvas }) {
+  const frame = canvas.width / canvas.height;
+  let bw = box.w * W;
+  let bh = box.h * H;
+  const cx = box.x * W + bw / 2;
+  const cy = box.y * H + bh / 2;
+  bw *= 1 + 2 * MARGIN;
+  bh *= 1 + 2 * MARGIN;
+  let rw = bw;
+  let rh = bh;
+  if (rw / rh < frame) rw = rh * frame;
+  else rh = rw / frame;
+  const fit = Math.min(1, W / rw, H / rh);
+  rw *= fit;
+  rh *= fit;
+  const x = clamp(cx - rw / 2, 0, W - rw);
+  const y = clamp(cy - rh / 2, 0, H - rh);
+  return { x: x / W, y: y / H, w: rw / W, h: rh / H, sourceWidth: rw, sourceHeight: rh };
+}
+
+const validBox = (b) =>
+  b && [b.x, b.y, b.w, b.h].every((n) => typeof n === "number" && Number.isFinite(n)) && b.w >= 0.08 && b.h >= 0.08 && b.x >= 0 && b.y >= 0 && b.x + b.w <= 1.001 && b.y + b.h <= 1.001;
+
+/**
+ * The final treatment, from what the model said and the picture's real size. Pure, so it can be tested without a model.
+ * `answer` is { kind, has_text, treatment, subject: {x,y,w,h}, reason }; null when there was no answer.
+ */
+export function decideTreatment({ answer, size, canvas }) {
+  const aspect = size.width / size.height;
+  const whole = (reason) => ({ treatment: "whole", aspect, reason });
+  if (!answer) return whole("no analysis; shown whole");
+  const kind = String(answer.kind ?? "").toLowerCase();
+  if (answer.treatment !== "focus") return whole(answer.reason ? `shown whole: ${answer.reason}` : "shown whole");
+  if (!CROPPABLE.has(kind)) return whole(`a ${kind || "this kind of picture"} is never cropped`);
+  if (answer.has_text) return whole("it has text that cropping could cut");
+  if (!validBox(answer.subject)) return whole("no usable subject box");
+  const rect = cropRect({ width: size.width, height: size.height, box: answer.subject, canvas });
+  if (rect.w * rect.h > MIN_GAIN) return whole("the subject already fills most of the picture");
+  const upscale = canvas.width / rect.sourceWidth;
+  if (upscale > MAX_UPSCALE) return whole(`the crop would be blown up ${upscale.toFixed(1)}x and look soft`);
+  const eps = 0.005;
+  const s = answer.subject;
+  if (s.x < rect.x - eps || s.y < rect.y - eps || s.x + s.w > rect.x + rect.w + eps || s.y + s.h > rect.y + rect.h + eps) return whole("the frame is too narrow to hold the whole subject");
+  return { treatment: "focus", aspect, crop: { x: rect.x, y: rect.y, w: rect.w, h: rect.h }, reason: `cropped to the subject${answer.reason ? `: ${answer.reason}` : ""}` };
+}
+
+/** A picture's pixel size, read with ffprobe (installed with ffmpeg). */
+async function probeSize(file) {
+  const out = await runTool("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file]);
+  const [width, height] = out.trim().split("x").map(Number);
+  if (!(width > 0 && height > 0)) throw new Error("could not read the picture's size");
+  return { width, height };
+}
+
+/** Saves the picture beside the render. Anything a browser cannot show is converted to PNG. */
+async function downloadUserImage(url, dir, name) {
+  const res = await fetchRetry(url, {}, { timeoutMs: 60_000 });
+  if (!res.ok) throw new Error(`download ${res.status}`);
+  const type = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!type.startsWith("image/")) throw new Error(`not a picture (${type || "no content type"})`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length > MAX_UPLOAD) throw new Error(`picture is ${(bytes.length / 1e6).toFixed(0)} MB, over the ${MAX_UPLOAD / 1e6} MB limit`);
+  const ext = EXT[type];
+  if (ext) {
+    const file = path.join(dir, `${name}${ext}`);
+    fs.writeFileSync(file, bytes);
+    return file;
+  }
+  const raw = path.join(dir, `${name}.src`);
+  fs.writeFileSync(raw, bytes);
+  const png = path.join(dir, `${name}.png`);
+  await runTool("ffmpeg", ["-y", "-loglevel", "error", "-i", raw, "-frames:v", "1", png]);
+  return png;
+}
+
+/** The glyph's answer about one picture, from a small copy of it (the full file stays here); null if it can't say. */
+async function askAboutPicture({ api, imagePath, narration, canvas, label, log }) {
+  try {
+    const small = `${imagePath}.look.jpg`;
+    await runTool("ffmpeg", ["-y", "-loglevel", "error", "-i", imagePath, "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2", "-q:v", "4", small]);
+    const out = await callGlyph(api, { action: "look", image_base64: fs.readFileSync(small).toString("base64"), narration, canvas_width: canvas.width, canvas_height: canvas.height });
+    if (!out.ok) throw new Error(out.error);
+    log.log(`Looked at the picture for ${label} with ${out.provider}.`);
+    return out.answer ?? null;
+  } catch (e) {
+    log.warn(`Could not analyse the picture for ${label}; showing it whole. ${e?.message || e}`);
+    return null;
+  }
+}
+
+/**
+ * Decides how one saved picture is shown (whole or cropped) and returns what the render page needs to draw it.
+ * `answer` stands in for the model's answer (the fixture's --user-image-answer); `api` null means no model is asked.
+ */
+export async function treatUserImage({ file, narration, canvas, label, api = null, log = console, answer: given = null }) {
+  const size = await probeSize(file);
+  const answer = given ?? (api ? await askAboutPicture({ api, imagePath: file, narration, canvas, label, log }) : null);
+  const decision = decideTreatment({ answer, size, canvas });
+  log.log(`Viewer's picture for ${label}: ${size.width}x${size.height}, ${decision.treatment}. ${decision.reason}`);
+  return { url: `/__gen/${path.basename(file)}`, ...decision };
+}
+
+/**
+ * Downloads the viewer's pictures and decides how each is shown. Returns { slideId: { url, treatment, aspect, crop? } },
+ * one for every scene, or throws naming the scenes whose picture is missing, not this film's, or unreadable.
+ */
+export async function prepareUserImages({ slides, projectId, api, dir, canvas, log = console }) {
+  const scenes = userImageScenes(slides);
+  if (scenes.length === 0) return {};
+  fs.mkdirSync(dir, { recursive: true });
+  const out = {};
+  const failures = [];
   await Promise.all(
     scenes.map(async (scene) => {
       try {
-        let prompt = scene.prompt;
-        if (!scene.described && geminiKey && scene.narration) {
-          try {
-            const sceneNumber = slides.findIndex((sl) => sl.id === scene.slideId) + 1;
-            prompt = `${await describeScene({ apiKey: geminiKey, baseUrl: env.GEMINI_BASE_URL, model: describeModel, filmOutline, narration: scene.narration, sceneNumber, mood, filmStyle })} ${style}`;
-          } catch (e) {
-            log.warn(`Could not write a description for ${scene.slideId}; using the plain subject. ${e?.message || e}`);
-          }
-        }
-        log.log(`Prompt for ${scene.slideId} (${scene.subjects.join(", ")}): ${prompt}`);
-        const file = await generateImage({ provider, prompt, outBase: path.join(dir, scene.slideId) });
-        photos[scene.slideId] = `/__gen/${path.basename(file)}`;
-        log.log(`Picture for ${scene.slideId} (${scene.subjects.join(", ")}): ${path.basename(file)}`);
+        const source = await api.get(`/item/contentsource/${encodeURIComponent(scene.sourceId)}`);
+        // A scene can only show a picture attached to THIS film; the id comes from storyboard HTML that an owner can edit.
+        if (!source || source.project_id !== projectId || source.source_type !== "image" || !source.file_url) throw new Error("that source is not a picture attached to this film");
+        const file = await downloadUserImage(source.file_url, dir, `user-${scene.slideId}`);
+        out[scene.slideId] = await treatUserImage({ file, narration: scene.narration, canvas, label: scene.slideId, api, log });
       } catch (e) {
-        log.warn(`No picture for ${scene.slideId} (${scene.subjects.join(", ")}); using icons. ${e?.message || e}`);
+        log.warn(`No viewer's picture for ${scene.slideId}. ${e?.message || e}`);
+        failures.push(`scene ${sceneNumber(slides, scene.slideId)}: ${String(e?.message || e)}`);
       }
     })
   );
-  return photos;
+  if (failures.length) throw new Error(`Could not use ${failures.length === 1 ? "the viewer's picture" : `${failures.length} of the viewer's pictures`}: ${failures.sort().join("; ")}`.slice(0, 380));
+  return out;
 }

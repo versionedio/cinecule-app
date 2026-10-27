@@ -47,7 +47,7 @@ export const THEMES: Theme[] = [
 ];
 
 export const DEFAULT_THEME = "midnight";
-export const LAYOUTS = ["cc-title", "cc-points", "cc-stat", "cc-split", "cc-quote", "cc-closing", "cc-picture"] as const;
+export const LAYOUTS = ["cc-title", "cc-points", "cc-stat", "cc-split", "cc-quote", "cc-closing", "cc-picture", "cc-photo"] as const;
 
 /** Font pairings a user can pick instead of the theme's own (data-font on the slide). */
 export interface FontStyle {
@@ -130,15 +130,29 @@ export interface DesignChoices {
   pictures: string;
   /** "decide" or one of LENGTHS. */
   length: string;
-  /** One of FORMATS ("wide" unless chosen). */
+  /** The first shape chosen: one of FORMATS ("wide" unless chosen). It sets the film's own shape and the example shown. */
   format: string;
+  /** Every shape to render, in the order chosen (always at least `format`). More than one makes one video per shape. */
+  formats: string[];
   /** "decide" (the standard voice) or an ElevenLabs voice id from src/config/voices.ts. */
   voice: string;
 }
-export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide", voice: "decide" };
+export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide", formats: ["wide"], voice: "decide" };
 
 /** The canvas the chosen format asks for. */
 export const formatOf = (id: string): FormatChoice => FORMATS.find((f) => f.id === id) ?? FORMATS[0];
+
+/** Every shape chosen, once each and in the order chosen; "wide" when none is. */
+export function chosenFormats(c: Pick<DesignChoices, "format" | "formats">): FormatChoice[] {
+  const ids = (c.formats?.length ? c.formats : [c.format]).filter((id, i, all) => FORMATS.some((f) => f.id === id) && all.indexOf(id) === i);
+  return (ids.length ? ids : ["wide"]).map(formatOf);
+}
+
+/** The shapes to render, as the project's render_aspect_ratios text ("16:9,9:16"); "" for a single shape, which needs no list. */
+export function renderRatiosText(c: Pick<DesignChoices, "format" | "formats">): string {
+  const shapes = chosenFormats(c);
+  return shapes.length > 1 ? shapes.map((f) => f.ratio).join(",") : "";
+}
 
 /**
  * The choices as plain text for the storyboard step (saved on the project). The storyboard prompt tells the
@@ -161,7 +175,12 @@ export function designChoicesText(c: DesignChoices): string {
         `Count the words of every narration_text before you answer and shorten any that is over. Keep the story whole: a hook, one idea per scene, a close.`
     );
   }
-  const fmt = formatOf(c.format);
+  // One storyboard serves every chosen shape, so its text is written to fit the narrowest one.
+  const shapes = chosenFormats(c);
+  const fmt = shapes.find((f) => f.id === "vertical") ?? shapes.find((f) => f.id === "square") ?? shapes[0];
+  if (shapes.length > 1) {
+    lines.push(`- Formats: the same film is rendered in ${shapes.map((f) => f.label).join(" and ")}, so write it once for all of them.`);
+  }
   if (fmt.id === "vertical") {
     lines.push(`- Format: vertical 9:16 for TikTok, Reels and Shorts. The screen is narrow, so headings are at most 5 words and each card or column at most 6 words.`);
   } else if (fmt.id === "square") {
@@ -209,7 +228,7 @@ const BASE_CSS = `
 .cc-closing{align-items:flex-start}
 .cc-closing .cc-h{font-size:118px}
 .cc-closing::after{content:"";width:220px;height:12px;border-radius:6px;background:var(--accent)}
-.cc-picture{padding:0}
+.cc-picture,.cc-photo{padding:0}
 /* Square and vertical canvases (1080 wide): tighter padding, smaller type, columns stacked. */
 @media (max-aspect-ratio:1/1){
 .cc{padding:110px 80px;gap:36px;font-size:54px}
@@ -228,12 +247,12 @@ const BASE_CSS = `
 .cc-q{font-size:78px;max-width:none}
 .cc-by{font-size:46px}
 .cc-closing .cc-h{font-size:112px}
-.cc-picture{padding:0}
+.cc-picture,.cc-photo{padding:0}
 }
 /* Vertical only: keep words clear of the caption and buttons TikTok, Reels and Shorts draw over the bottom and right. */
 @media (max-aspect-ratio:3/4){
 .cc{padding:220px 150px 400px 80px}
-.cc-picture{padding:0}
+.cc-picture,.cc-photo{padding:0}
 }
 `;
 
@@ -271,4 +290,23 @@ export function themeHead(html: string): string {
 /** What the storyboard prompt should say about the themes, so the prompt and the stylesheet never drift apart. */
 export function themeGuide(): string {
   return THEMES.map((t) => `${t.name} (${t.suits})`).join("; ");
+}
+
+/**
+ * What someone picked, in plain words, for showing back to them in the chat. Unlike designChoicesText (instructions for
+ * the AI), this is written for the person. `voiceName` is looked up by the caller, since voices live in their own config.
+ */
+export function designChoicesSummary(c: DesignChoices, voiceName?: string): string {
+  const label = (list: { id: string; label: string }[], id: string) => list.find((x) => x.id === id)?.label ?? id;
+  const lines = [
+    `Theme: ${c.theme === "decide" ? "you decide" : c.theme[0].toUpperCase() + c.theme.slice(1)}`,
+    `Background: ${c.background === "decide" ? "you decide" : label(BACKGROUNDS, c.background)}`,
+    `Fonts: ${label(FONT_STYLES, c.font)}`,
+    `Layout mix: ${label(LAYOUT_MIXES, c.layout)}`,
+    `Pictures: ${c.pictures === "decide" ? "you decide" : label(PICTURE_AMOUNTS, c.pictures)}`,
+    `Length: ${c.length === "decide" ? "you decide" : label(LENGTHS, c.length)}`,
+    `Format: ${chosenFormats(c).map((f) => f.label).join(" + ")}`,
+    `Narrator: ${voiceName ?? "standard voice"}`
+  ];
+  return lines.join("\n");
 }

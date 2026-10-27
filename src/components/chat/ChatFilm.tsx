@@ -5,11 +5,13 @@ import { entityService } from "@/services/entityService";
 import { startPipeline } from "@/services/pipelineService";
 import { ENTITY_NAMES, ExportAsset, GeneratedHtml, Project, ProjectStatus } from "@/config/entities";
 import RenderProgress from "@/components/common/RenderProgress";
-import { AssistantBubble, Typed, TypingDots } from "@/components/chat/Bubbles";
+import { AssistantBubble, Typed, TypingDots, UserBubble } from "@/components/chat/Bubbles";
 import DesignChoicesCard from "@/components/chat/DesignChoicesCard";
-import { DesignChoices, designChoicesText, formatOf } from "@/render/theme";
+import { DesignChoices, chosenFormats, designChoicesSummary, designChoicesText, formatOf, renderRatiosText } from "@/render/theme";
+import { voiceById } from "@/config/voices";
 import { Button } from "@/components/ui/button";
 import { updateRecord } from "@/services/secureWriteService";
+import { latestRenders, shapeName } from "@/services/renderService";
 
 const POLL_MS = 2500;
 // Where each status sits in the pipeline; "failed" and "archived" sit outside it.
@@ -43,14 +45,24 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [slides, setSlides] = useState<GeneratedHtml[]>([]);
-  const [videoUrl, setVideoUrl] = useState("");
-  const [videoBroken, setVideoBroken] = useState(false);
+  // The finished videos of the latest render: one per shape chosen (a single one for most films).
+  const [videos, setVideos] = useState<{ id: string; url: string; ratio?: string }[]>([]);
+  const [brokenVideos, setBrokenVideos] = useState<string[]>([]);
   const [error, setError] = useState("");
   // A film made in this conversation starts by itself; an older draft only starts when asked.
   const [kicked, setKicked] = useState(false);
   // A film made in this conversation first asks how it should look; answering (or skipping) starts it.
   const [designDone, setDesignDone] = useState(false);
   const [savingDesign, setSavingDesign] = useState(false);
+  // What was picked, shown back as the person's own message. It is read-only, and kept in this browser so it is
+  // still there if the page is reloaded while the film is made.
+  const [picked, setPicked] = useState<string>(() => {
+    try {
+      return localStorage.getItem(`cinecule.design.${projectId}`) ?? "";
+    } catch {
+      return "";
+    }
+  });
   const started = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -116,8 +128,11 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
     entityService
       .list<ExportAsset>(ENTITY_NAMES.exportAsset, { project_id: projectId, asset_type: "video", pagesize: 20 })
       .then((r) => {
-        const ready = (r.data ?? []).filter((a) => a.cdn_url).sort((a, b) => (a.id < b.id ? 1 : -1));
-        setVideoUrl(ready[0]?.cdn_url ?? "");
+        setVideos(
+          latestRenders(r.data ?? [])
+            .filter((a) => a.cdn_url)
+            .map((a) => ({ id: a.id, url: a.cdn_url as string, ratio: a.aspect_ratio }))
+        );
       })
       .catch(() => undefined);
   }, [projectId, status]);
@@ -141,11 +156,20 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
       const patch: Record<string, unknown> = {};
       if (text) patch.article_content = text;
       if (choices) patch.canvas_aspect_ratio = formatOf(choices.format).ratio;
+      // More than one shape chosen: the backend makes one video per shape in this list (empty means just the one above).
+      if (choices && chosenFormats(choices).length > 1) patch.render_aspect_ratios = renderRatiosText(choices);
       // The chosen narrator is saved on the film; no choice leaves it blank, which means the standard voice.
       if (choices && choices.voice !== "decide") patch.voice_id = choices.voice;
       if (Object.keys(patch).length) await updateRecord(ENTITY_NAMES.project, projectId, patch);
     } catch (e) {
       console.warn("[chat] couldn't save the design choices; the film will be styled automatically", e);
+    }
+    const summary = choices ? designChoicesSummary(choices, voiceById(choices.voice)?.name) : "Skip, you decide";
+    setPicked(summary);
+    try {
+      localStorage.setItem(`cinecule.design.${projectId}`, summary);
+    } catch {
+      // Remembering it is a convenience; the chat still shows it for this visit.
     }
     setSavingDesign(false);
     setDesignDone(true);
@@ -192,6 +216,9 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
           </span>
         )}
       </AssistantBubble>
+
+      {/* The choices, as the person's own message */}
+      {picked && !asking && <UserBubble text={picked} />}
 
       {/* 2. Storyboard */}
       {stage >= 1 && (
@@ -288,18 +315,28 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
           <p className="mb-3">
             <Typed key="ready" text="Your film is ready." />
           </p>
-          {videoUrl && !videoBroken ? (
-            <video className="chat-in w-full rounded-xl border border-white/15 bg-black" src={videoUrl} controls preload="metadata" onError={() => setVideoBroken(true)} />
-          ) : null}
-          <div className="mt-3 flex flex-wrap gap-2">
-            {videoUrl && (
-              <a href={videoUrl} target="_blank" rel="noreferrer">
+          {videos.map((v) => (
+            <div key={v.id} className="mb-3">
+              {videos.length > 1 && shapeName(v.ratio) && <p className="mb-1.5 text-xs uppercase tracking-widest text-muted">{shapeName(v.ratio)}</p>}
+              {!brokenVideos.includes(v.id) && (
+                <video
+                  className="chat-in w-full rounded-xl border border-white/15 bg-black"
+                  style={{ maxHeight: v.ratio === "9:16" ? "70vh" : undefined }}
+                  src={v.url}
+                  controls
+                  preload="metadata"
+                  onError={() => setBrokenVideos((b) => [...b, v.id])}
+                />
+              )}
+              <a href={v.url} target="_blank" rel="noreferrer" className="mt-2 inline-block">
                 <Button variant="outline" size="sm" tabIndex={-1}>
                   <ExternalLink className="h-3.5 w-3.5" />
-                  Open video
+                  {videos.length > 1 && shapeName(v.ratio) ? `Open ${shapeName(v.ratio)}` : "Open video"}
                 </Button>
               </a>
-            )}
+            </div>
+          ))}
+          <div className="mt-3 flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={() => navigate(`/projects/${projectId}/storyboard`)}>
               <Clapperboard className="h-3.5 w-3.5" />
               Storyboard editor
