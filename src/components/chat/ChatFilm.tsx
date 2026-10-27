@@ -124,15 +124,17 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
   }, [projectId, stage]);
 
   useEffect(() => {
-    if (status !== "ready") return;
+    if (status !== "ready" && status !== "failed") return;
     entityService
       .list<ExportAsset>(ENTITY_NAMES.exportAsset, { project_id: projectId, asset_type: "video", pagesize: 20 })
       .then((r) => {
+        const batch = latestRenders(r.data ?? []);
         setVideos(
-          latestRenders(r.data ?? [])
-            .filter((a) => a.cdn_url)
+          batch
+            .filter((a) => a.status === "ready" && a.cdn_url)
             .map((a) => ({ id: a.id, url: a.cdn_url as string, ratio: a.aspect_ratio }))
         );
+        setFailedShapes(batch.filter((a) => a.status === "failed").map((a) => shapeName(a.aspect_ratio) || "video"));
       })
       .catch(() => undefined);
   }, [projectId, status]);
@@ -182,6 +184,10 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
     setKicked(true);
     await setStatus("draft");
   };
+
+  // Some videos finished and some did not: show the ones that did, and say plainly which did not.
+  const partial = videos.length > 0 && failedShapes.length > 0;
+  const showFilm = stage === 6 || (failed && videos.length > 0);
 
   const totalSeconds = slides.reduce((t, s) => t + (Number(s.duration) || 0), 0);
 
@@ -310,10 +316,13 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
       )}
 
       {/* 7. The film */}
-      {stage === 6 && (
+      {showFilm && (
         <AssistantBubble>
           <p className="mb-3">
-            <Typed key="ready" text="Your film is ready." />
+            <Typed
+              key={partial ? "partial" : "ready"}
+              text={partial ? `${videos.length === 1 ? "One video is ready" : "Some videos are ready"}, but the ${failedShapes.join(" and ")} video didn't finish.` : "Your film is ready."}
+            />
           </p>
           {videos.map((v) => (
             <div key={v.id} className="mb-3">
@@ -342,12 +351,16 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
               Storyboard editor
             </Button>
           </div>
-          <p className="mt-3 text-sm text-muted">Describe another film below to start the next one.</p>
+          {partial ? (
+            <p className="mt-3 text-sm text-muted">You can render the missing video again from the storyboard editor.</p>
+          ) : (
+            <p className="mt-3 text-sm text-muted">Describe another film below to start the next one.</p>
+          )}
         </AssistantBubble>
       )}
 
       {/* Problems */}
-      {(failed || error) && (
+      {(failed || error) && !(failed && !error && partial) && (
         <AssistantBubble tone="error">
           <p>{error || "Something went wrong while making this film."}</p>
           <Button variant="destructive" size="sm" className="mt-3" onClick={retry}>
