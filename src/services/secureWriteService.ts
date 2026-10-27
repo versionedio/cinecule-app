@@ -19,7 +19,7 @@ const EDITABLE: Record<string, string[]> = {
   [ENTITY_NAMES.cameraShot]: COMMON.concat(["slide_id", "label", "start_time", "end_time", "target_selector", "x_percent", "y_percent", "zoom", "transition_duration", "easing", "shot_type"]),
   [ENTITY_NAMES.videoEffectCue]: COMMON.concat(["slide_id", "interaction_id", "label", "start_time", "duration", "target_selector", "effect"]),
   [ENTITY_NAMES.cursorTimelinePoint]: COMMON.concat(["slide_id", "interaction_id", "time", "x_percent", "y_percent", "duration_ms", "click", "label", "source", "selector", "point_role", "sequence_index"]),
-  [ENTITY_NAMES.contentSource]: COMMON.concat(["source_type", "title", "url", "raw_text", "file_key", "file_url"])
+  [ENTITY_NAMES.contentSource]: COMMON.concat(["source_type", "title", "url", "raw_text", "file_key", "file_url", "image_preview"])
 };
 
 export interface WriteOp {
