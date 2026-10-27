@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { client, login } from "./lib.mjs";
-import { generateSceneImages } from "./images.mjs";
+import { generateSceneImages, prepareUserImages, treatUserImage } from "./images.mjs";
 
 const DIST = path.resolve("dist");
 // There is no upload limit on the current plan, so videos are encoded for quality, not size.
@@ -63,6 +63,19 @@ function serveDist(genDir) {
   return new Promise((resolve) => server.listen(0, () => resolve({ server, port: server.address().port })));
 }
 
+// A render may ask for its own shape (asset.aspect_ratio); a queued asset without one is the project's own shape.
+// The asset's resolution says how big (its longer side by its shorter), and the shape decides which way round.
+const SHAPES = ["16:9", "9:16", "1:1"];
+function shapedResolution(resolution, aspect) {
+  const [w, h] = String(resolution).split("x").map(Number);
+  if (!(w > 0 && h > 0) || !SHAPES.includes(aspect)) return resolution;
+  const long = Math.max(w, h);
+  const short = Math.min(w, h);
+  if (aspect === "9:16") return `${short}x${long}`;
+  if (aspect === "1:1") return `${short}x${short}`;
+  return `${long}x${short}`;
+}
+
 const run = (cmd, args) =>
   new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
@@ -72,8 +85,8 @@ const run = (cmd, args) =>
   });
 
 // Optional render-page switches: ?debug=1 burns timing info into frames, ?art=0 turns off picture-scene icons.
-function renderQuery({ debug, art, theme, bg }) {
-  const q = [debug ? "debug=1" : "", art ? "" : "art=0", theme ? `theme=${encodeURIComponent(theme)}` : "", theme && bg ? `bg=${encodeURIComponent(bg)}` : ""].filter(Boolean).join("&");
+function renderQuery({ debug, art, theme, bg, aspect, userimage, strict }) {
+  const q = [strict ? "strict=1" : "", aspect ? `aspect=${encodeURIComponent(aspect)}` : "", userimage ? "userimage=1" : "", debug ? "debug=1" : "", art ? "" : "art=0", theme ? `theme=${encodeURIComponent(theme)}` : "", theme && bg ? `bg=${encodeURIComponent(bg)}` : ""].filter(Boolean).join("&");
   return q ? `?${q}` : "";
 }
 
@@ -201,11 +214,23 @@ async function runFixture(args) {
     fs.copyFileSync(args.photo, path.join(genDir, name));
     fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify({ slp: `/__gen/${name}` }));
   }
+  // --user-image <file> (with --theme) stands in for a viewer's own picture on the themed fixture's picture scene.
+  const userImage = typeof args["user-image"] === "string" ? args["user-image"] : "";
+  if (userImage) {
+    fs.mkdirSync(genDir, { recursive: true });
+    const copy = path.join(genDir, `user-t6${path.extname(userImage) || ".png"}`);
+    fs.copyFileSync(userImage, copy);
+    const [w, h] = String(args.res || "1920x1080").split("x").map(Number);
+    const shaped = args.aspect === "9:16" ? { width: Math.min(w, h), height: Math.max(w, h) } : args.aspect === "1:1" ? { width: Math.min(w, h), height: Math.min(w, h) } : { width: Math.max(w, h), height: Math.min(w, h) };
+    const given = typeof args["user-image-answer"] === "string" ? JSON.parse(args["user-image-answer"]) : null;
+    const treated = await treatUserImage({ file: copy, narration: "Meet the cat, a small hunter who chose to live with us.", canvas: shaped, label: "t6", answer: given });
+    fs.writeFileSync(path.join(genDir, "user-images.json"), JSON.stringify({ t6: treated }));
+  }
   const { server, port } = await serveDist(genDir);
   try {
     const res = await renderVideo({
-      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"], theme: typeof args.theme === "string" ? args.theme : undefined, bg: typeof args.bg === "string" ? args.bg : undefined })}`,
-      resolution: args.res || "1920x1080",
+      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"], userimage: Boolean(userImage), strict: Boolean(args.strict), aspect: typeof args.aspect === "string" ? args.aspect : undefined, theme: typeof args.theme === "string" ? args.theme : undefined, bg: typeof args.bg === "string" ? args.bg : undefined })}`,
+      resolution: shapedResolution(args.res || "1920x1080", typeof args.aspect === "string" ? args.aspect : undefined),
       fps: Number(args.fps) || 30,
       maxSeconds: args["max-seconds"] ? Number(args["max-seconds"]) : undefined,
       outFile,
@@ -268,14 +293,15 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
   try {
     const asset = await api.get(`/item/exportasset/${assetId}`);
     const projectId = asset.project_id;
-    const resolution = asset.resolution || "1920x1080";
+    const aspect = SHAPES.includes(asset.aspect_ratio) ? asset.aspect_ratio : undefined;
+    const resolution = shapedResolution(asset.resolution || "1920x1080", aspect);
     const fps = Number(asset.frame_rate) || 30;
-    console.log(`Asset ${assetId}: project ${projectId}, ${resolution} @ ${fps} fps`);
+    console.log(`Asset ${assetId}: project ${projectId}, ${aspect ?? "project shape"}, ${resolution} @ ${fps} fps`);
     // How long this film should take from here, so the countdown starts at a realistic number instead of a guess.
     const slides = await api.list("generatedhtml", { project_id: projectId });
     const videoSec = slides.reduce((t, sl) => t + (Number(sl.duration) || 0), 0);
     const framesSec = frameSeconds(videoSec * fps, resolution);
-    const hasPictures = slides.some((sl) => /data-art\s*=\s*["']/.test(String(sl.html_content ?? "")));
+    const hasPictures = slides.some((sl) => /data-(?:art|image-source)\s*=\s*["']/.test(String(sl.html_content ?? "")));
     const picturesSec = hasPictures ? PICTURES_SEC : 0;
     const remaining = () => Math.round(framesSec + picturesSec + FINISH_SEC);
     await report({ stage: "Preparing", pct: 3, eta: remaining() + 15 });
@@ -293,17 +319,23 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
     }
     console.log(`Fetched ${clipFiles.size} voiceover clip(s).`);
 
-    // Real pictures for picture scenes (skipped, with icons as the fallback, when no image key is set: GEMINI_API_KEY or ELEVENLABS_IMAGE_KEY).
+    // Real pictures for picture scenes, made by the scene_images glyph in nostackai (it holds the provider keys; none are on
+    // GitHub). If one can't be made (no key set there, a limit, a failure) the render FAILS with the reason: there is no
+    // fallback to icons or an empty frame.
     await report({ stage: hasPictures ? "Creating pictures" : "Preparing", pct: 5, eta: remaining() });
     const genDir = path.join(tmp, "gen");
-    const photos = await generateSceneImages({ slides, dir: genDir });
+    const [canvasW, canvasH] = resolution.split("x").map(Number);
+    const photos = await generateSceneImages({ slides, dir: genDir, api, aspectRatio: canvasW === canvasH ? "1:1" : canvasW > canvasH ? "16:9" : "9:16" });
     if (Object.keys(photos).length > 0) fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify(photos));
+    // The viewer's own pictures, each shown whole or cropped to its subject for THIS render's shape.
+    const userImages = await prepareUserImages({ slides, projectId, api, dir: genDir, canvas: { width: canvasW, height: canvasH } });
+    if (Object.keys(userImages).length > 0) fs.writeFileSync(path.join(genDir, "user-images.json"), JSON.stringify(userImages));
     await report({ stage: "Starting the render", pct: 8, eta: Math.round(framesSec + FINISH_SEC) });
 
     const served = await serveDist(genDir);
     server = served.server;
     const result = await renderVideo({
-      url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art })}`,
+      url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art, aspect, strict: true })}`,
       token,
       resolution,
       fps,

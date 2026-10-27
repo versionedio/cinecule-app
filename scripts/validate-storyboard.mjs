@@ -12,7 +12,7 @@ if (!file || file.startsWith("--")) { console.error("usage: node scripts/validat
 const THEMES = ["midnight", "ember", "forest", "ocean", "paper", "slate", "plum"];
 const BGS = ["plain", "gradient", "glow"];
 const FONTS = ["editorial", "clean", "bold"];
-const LAYOUTS = ["cc-title", "cc-points", "cc-stat", "cc-split", "cc-quote", "cc-closing", "cc-picture"];
+const LAYOUTS = ["cc-title", "cc-points", "cc-stat", "cc-split", "cc-quote", "cc-closing", "cc-picture", "cc-photo"];
 
 let raw = JSON.parse(fs.readFileSync(file, "utf8"));
 if (typeof raw === "string") raw = JSON.parse(raw);
@@ -34,7 +34,7 @@ for (const [i, s] of slides.entries()) {
     return {
       rootCount: roots.length,
       cls: root ? [...root.classList] : [],
-      theme: root?.dataset.theme, bg: root?.dataset.bg, font: root?.dataset.font, art: root?.dataset.art,
+      theme: root?.dataset.theme, bg: root?.dataset.bg, font: root?.dataset.font, art: root?.dataset.art, imageSource: root?.dataset.imageSource,
       styleAttrs: document.querySelectorAll("[style]").length - (root?.hasAttribute("style") ? 0 : 0),
       banned: [...document.querySelectorAll("svg,img,script,link,iframe,canvas")].map((e) => e.tagName.toLowerCase()),
       headings: [...document.querySelectorAll(".cc-h,.cc-q")].map(txt),
@@ -53,13 +53,19 @@ for (const [i, s] of slides.entries()) {
   if (!THEMES.includes(d.theme)) bad(i, `data-theme "${d.theme}" is not one of the themes`);
   if (!BGS.includes(d.bg)) bad(i, `data-bg "${d.bg}" is not plain, gradient or glow`);
   if (d.font && !FONTS.includes(d.font)) bad(i, `data-font "${d.font}" is not editorial, clean or bold`);
-  if (d.styleAttrs > 0 && layout !== "cc-picture") bad(i, `${d.styleAttrs} inline style attribute(s); the stylesheet should supply all styling`);
+  if (d.styleAttrs > 0 && layout !== "cc-picture" && layout !== "cc-photo") bad(i, `${d.styleAttrs} inline style attribute(s); the stylesheet should supply all styling`);
   if (d.banned.length) bad(i, `contains ${[...new Set(d.banned)].join(", ")}, which are not allowed`);
   if (!String(s.narration_text ?? "").trim()) bad(i, "narration_text is empty, so the scene would be silent");
   if (layout === "cc-picture") {
     if (d.text) bad(i, "a picture scene must have no text on screen");
     if (!d.art) bad(i, "a picture scene needs data-art");
     if ((s.interactions ?? []).length) bad(i, "a picture scene must have no interactions");
+  } else if (layout === "cc-photo") {
+    // The viewer's own picture: nothing but the frame, named by the id of the source they attached.
+    if (d.text) bad(i, "a viewer's-picture scene must have no text on screen");
+    if (!d.imageSource) bad(i, "a viewer's-picture scene needs data-image-source");
+    if ((s.interactions ?? []).length) bad(i, "a viewer's-picture scene must have no interactions");
+    if (i === 0 || i === slides.length - 1) bad(i, "the first and last scenes are not viewer's-picture scenes");
   } else {
     d.headings.forEach((h) => words(h) > 7 && layout !== "cc-quote" && bad(i, `heading has ${words(h)} words (max 7): "${h}"`));
     d.cards.forEach((c) => words(c) > 8 && bad(i, `card/column has ${words(c)} words (max 8): "${c}"`));

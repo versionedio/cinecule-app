@@ -39,11 +39,21 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
 export default function DesignChoicesCard({ onSubmit, onSkip, busy }: { onSubmit: (choices: DesignChoices) => void; onSkip: () => void; busy: boolean }) {
   const [c, setC] = useState<DesignChoices>(NO_CHOICES);
   const set = (patch: Partial<DesignChoices>) => setC((prev) => ({ ...prev, ...patch }));
+  // Shapes can be added or taken away, but one always stays. The first one chosen sets the film's own shape and the example.
+  const toggleFormat = (id: string) =>
+    setC((prev) => {
+      const has = prev.formats.includes(id);
+      if (has && prev.formats.length === 1) return prev;
+      const formats = has ? prev.formats.filter((x) => x !== id) : [...prev.formats, id];
+      return { ...prev, formats, format: formats[0] };
+    });
 
   // The example sits at the top of the card. If a choice is made further down while it is out of view, bring it
   // back into view so the change is visible straight away (nothing floats over the options).
   const previewBox = useRef<HTMLDivElement>(null);
   const firstRun = useRef(true);
+  // The narrator doesn't change the example, so picking one must not pull the view back up to it.
+  const lookKey = JSON.stringify([c.theme, c.background, c.font, c.layout, c.pictures, c.length, c.format]);
   useEffect(() => {
     const el = previewBox.current;
     if (!el) return;
@@ -56,7 +66,7 @@ export default function DesignChoicesCard({ onSubmit, onSkip, busy }: { onSubmit
     }
     const r = el.getBoundingClientRect();
     if (r.top < 70 || r.bottom > window.innerHeight - 10) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [c]);
+  }, [lookKey]);
 
   return (
     <div className="chat-in mt-3 space-y-4" style={{ animationDelay: "500ms" }}>
@@ -110,9 +120,9 @@ export default function DesignChoicesCard({ onSubmit, onSkip, busy }: { onSubmit
         ))}
       </Group>
 
-      <Group label="Format">
+      <Group label="Format (pick one or more, each is rendered as its own video)">
         {FORMATS.map((f) => (
-          <Chip key={f.id} selected={c.format === f.id} onClick={() => set({ format: f.id })} title={f.description}>{f.label}</Chip>
+          <Chip key={f.id} selected={c.formats.includes(f.id)} onClick={() => toggleFormat(f.id)} title={f.description}>{f.label}</Chip>
         ))}
       </Group>
 

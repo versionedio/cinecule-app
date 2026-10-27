@@ -43,17 +43,12 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [slides, setSlides] = useState<GeneratedHtml[]>([]);
-<<<<<<< Updated upstream
-  const [videoUrl, setVideoUrl] = useState("");
-  const [videoBroken, setVideoBroken] = useState(false);
-=======
   // The finished videos of the latest render: one per shape chosen (a single one for most films).
   const [videos, setVideos] = useState<{ id: string; url: string; ratio?: string }[]>([]);
   // Shapes of the latest render that did not finish. The film's status only says how the LAST video ended, so
   // it can't tell "all done" from "one done, one failed".
   const [failedShapes, setFailedShapes] = useState<string[]>([]);
   const [brokenVideos, setBrokenVideos] = useState<string[]>([]);
->>>>>>> Stashed changes
   const [error, setError] = useState("");
   // A film made in this conversation starts by itself; an older draft only starts when asked.
   const [kicked, setKicked] = useState(false);

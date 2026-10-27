@@ -3,7 +3,7 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { entityService } from "@/services/entityService";
 import { ENTITY_NAMES, GeneratedHtml, Interaction, Project } from "@/config/entities";
 import {
-  ActiveEffect, RenderData, SlideTiming, buildSlideTimings, cameraAt, cameraTransform, canvasSize,
+  ActiveEffect, RenderData, SlideTiming, UserImage, buildSlideTimings, cameraAt, cameraTransform, canvasSize,
   clamp, easeOut, slideStateAt
 } from "@/render/timeline";
 import { Box, Decision, Intensity, Measured, PlannedEffect, PlannedReveal, Proposal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
@@ -57,6 +57,18 @@ async function loadPhotos(): Promise<Record<string, string>> {
     if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return {};
     const json = await res.json();
     return json && typeof json === "object" ? (json as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The viewer's own pictures the render script saved for this render (how each is shown), if any. */
+async function loadUserImages(): Promise<Record<string, UserImage>> {
+  try {
+    const res = await fetch("/__gen/user-images.json");
+    if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return {};
+    const json = await res.json();
+    return json && typeof json === "object" ? (json as Record<string, UserImage>) : {};
   } catch {
     return {};
   }
@@ -300,7 +312,33 @@ function buildLayer(host: HTMLElement, timing: SlideTiming, index: number, width
 }
 
 /** Once a slide has loaded, let the director decide what really happens in it. */
-function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null) {
+/**
+ * The viewer's picture as a full-frame element. "focus" shows only the cropped part. "whole" shows everything: where the
+ * picture's shape differs from the frame's, it sits fully inside the frame on a blurred, darkened copy of itself.
+ */
+function buildUserImage(doc: Document, mine: UserImage, frameAspect: number): { box: HTMLDivElement; main: HTMLImageElement } {
+  const box = doc.createElement("div");
+  box.id = "__user-image";
+  box.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden;opacity:0;pointer-events:none;");
+  const main = doc.createElement("img");
+  main.src = mine.url;
+  const crop = mine.treatment === "focus" ? mine.crop : undefined;
+  if (crop && crop.w > 0 && crop.h > 0) {
+    main.setAttribute("style", `position:absolute;max-width:none;width:${(100 / crop.w).toFixed(3)}%;height:${(100 / crop.h).toFixed(3)}%;left:${((-crop.x / crop.w) * 100).toFixed(3)}%;top:${((-crop.y / crop.h) * 100).toFixed(3)}%;`);
+  } else if (Math.abs(mine.aspect - frameAspect) / frameAspect < 0.05) {
+    main.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;");
+  } else {
+    const back = doc.createElement("img");
+    back.src = mine.url;
+    back.setAttribute("style", "position:absolute;left:-6%;top:-6%;width:112%;height:112%;object-fit:cover;filter:blur(36px) brightness(.55);");
+    box.appendChild(back);
+    main.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;");
+  }
+  box.appendChild(main);
+  return { box, main };
+}
+
+function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null, strict = false) {
   const doc = layer.frame.contentDocument;
   if (!doc?.body) return;
   const slide = layer.timing.slide;
@@ -326,7 +364,18 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   const artDecisions: Decision[] = [];
   const heroEl = doc.querySelector<HTMLElement>("[data-art]");
   const photoUrl = data.photos?.[slide.id];
-  if (heroEl && photoUrl) {
+  const mine = data.userImages?.[slide.id];
+  if (strict && doc.querySelector("[data-image-source]") && !mine) throw new Error(`Scene ${layer.index + 1} shows the viewer's picture, but it was not prepared.`);
+  if (strict && heroEl && !photoUrl && !mine) throw new Error(`Scene ${layer.index + 1} is a picture scene, but its picture was not made.`);
+  if (mine && doc.querySelector("[data-image-source]")) {
+    // The viewer's own picture, full frame: all of it, or cropped to its subject (decided by the render script).
+    layer.hero = true;
+    const { box, main } = buildUserImage(doc, mine, width / height);
+    doc.body.appendChild(box);
+    layer.photoImg = main;
+    layer.arts.push({ el: box, start: 0.2, shapes: [], photo: true });
+    artDecisions.push({ id: "art:user-image", selector: "", status: "kept", reason: `shows the viewer's picture, ${mine.treatment}${mine.reason ? ` (${mine.reason})` : ""}` });
+  } else if (heroEl && photoUrl) {
     // A real picture, full frame, replaces the icons.
     layer.hero = true;
     const img = doc.createElement("img");
@@ -400,7 +449,7 @@ function findBlocks(doc: Document, width: number, height: number): HTMLElement[]
   const visit = (parent: Element) => {
     for (const child of Array.from(parent.children)) {
       const el = child as HTMLElement;
-      if (el.id.startsWith("__") || el.hasAttribute("data-art")) continue; // the effects layer and clip art manage themselves
+      if (el.id.startsWith("__") || el.hasAttribute("data-art") || el.hasAttribute("data-image-source")) continue; // the effects layer and clip art manage themselves
       if (el.id) {
         const r = el.getBoundingClientRect();
         const big = (r.width * r.height) / (width * height) > 0.7;
@@ -473,6 +522,8 @@ export default function RenderPage() {
   const flat = params.get("flat") === "1";
   // Picture scenes need the icon library; ?art=0 turns it off.
   const artOn = params.get("art") !== "0";
+  // A real render (?strict=1) never falls back to icons or an empty frame: a picture scene without its picture is an error.
+  const strict = params.get("strict") === "1";
   const [duration, setDuration] = useState(0);
   const setTimeRef = useRef<(t: number) => void>(() => undefined);
 
@@ -482,10 +533,15 @@ export default function RenderPage() {
     let cancelled = false;
 
     const ready = (async (): Promise<RenderInfo> => {
-      const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient", params.get("font") ?? "theme") : FIXTURE) : await loadData(id)), photos: await loadPhotos() };
-      // The built-in sample film can be shown in another shape (?aspect=9:16 or 1:1), to judge the vertical and square styles.
+      const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient", params.get("font") ?? "theme") : FIXTURE) : await loadData(id)), photos: await loadPhotos(), userImages: await loadUserImages() };
+      // One film can be rendered in more than one shape: a render names its own (?aspect=16:9, 9:16 or 1:1), and that
+      // wins over the shape saved on the project. It also lets the built-in sample be judged in vertical and square.
       const shape = params.get("aspect");
-      if (id === "fixture" && (shape === "9:16" || shape === "1:1")) data.project = { ...data.project, canvas_aspect_ratio: shape };
+      if (shape === "16:9" || shape === "9:16" || shape === "1:1") data.project = { ...data.project, canvas_aspect_ratio: shape };
+      // ?userimage=1 turns the themed sample's picture scene into a viewer's-picture scene (see render.mjs --user-image).
+      if (id === "fixture" && params.get("userimage") === "1") {
+        data.slides = data.slides.map((sl) => (sl.id === "t6" ? { ...sl, html_content: sl.html_content.replace(/ data-art="[^"]*"/, ' data-image-source="fixture-image"') } : sl));
+      }
       // The sample film can be forced to one transition (?transition=slide-left), to judge how it looks.
       const forced = params.get("transition");
       if (id === "fixture" && forced) data.slides = data.slides.map((sl) => ({ ...sl, transition: forced as typeof sl.transition, transition_duration: 0.6 }));
@@ -510,7 +566,7 @@ export default function RenderPage() {
       } catch {
         /* no art library available: scenes simply render without clip art */
       }
-      layers.forEach((l) => planLayer(l, data, width, height, art));
+      layers.forEach((l) => planLayer(l, data, width, height, art, strict));
       // A generated picture must be decoded before any frame is drawn, or early frames would show it half-loaded.
       await Promise.all(layers.map((l) => l.photoImg?.decode?.().catch(() => undefined)));
 
@@ -622,7 +678,7 @@ export default function RenderPage() {
       cancelled = true;
       delete window.__render;
     };
-  }, [id, debug, artOn, flat]);
+  }, [id, debug, artOn, flat, strict]);
 
   return (
     <div style={{ background: "#000", minHeight: "100vh" }}>

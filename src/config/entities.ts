@@ -40,6 +40,8 @@ export interface Project {
   video_type: VideoType;
   status: ProjectStatus;
   canvas_aspect_ratio: CanvasAspectRatio;
+  // The shapes to render, comma separated ("16:9,9:16"); one video is made per shape. Empty: one, in canvas_aspect_ratio.
+  render_aspect_ratios?: string;
   custom_canvas_width?: number;
   custom_canvas_height?: number;
   director_camera_intensity?: CameraIntensity;
@@ -153,6 +155,8 @@ export interface ExportAsset {
   cdn_url?: string;
   status: ExportAssetStatus;
   resolution?: string;
+  // The shape this render was made in. Empty: the film's own shape.
+  aspect_ratio?: "16:9" | "9:16" | "1:1";
   frame_rate?: number;
   duration_sec?: number;
   // Reported by the render worker while the asset is "processing".

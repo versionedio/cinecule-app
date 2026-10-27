@@ -12,14 +12,14 @@ const EDITABLE: Record<string, string[]> = {
   [ENTITY_NAMES.project]: COMMON.concat([
     "article_content", "video_type", "status", "canvas_aspect_ratio", "custom_canvas_width", "custom_canvas_height",
     "director_camera_intensity", "director_auto_generate_effects", "director_zoom_hold_after_effect_sec",
-    "director_camera_move_duration_sec", "cursor_speed", "render_resolution", "render_fps", "error_message", "voice_id"
+    "director_camera_move_duration_sec", "cursor_speed", "render_resolution", "render_fps", "error_message", "voice_id", "render_aspect_ratios"
   ]),
   [ENTITY_NAMES.generatedHtml]: COMMON.concat(["html_content", "sort_order", "duration", "transition", "transition_duration", "narration_text"]),
   [ENTITY_NAMES.interaction]: COMMON.concat(["slide_id", "target_text", "target_selector", "action", "trigger", "time_offset", "duration", "label", "sort_order"]),
   [ENTITY_NAMES.cameraShot]: COMMON.concat(["slide_id", "label", "start_time", "end_time", "target_selector", "x_percent", "y_percent", "zoom", "transition_duration", "easing", "shot_type"]),
   [ENTITY_NAMES.videoEffectCue]: COMMON.concat(["slide_id", "interaction_id", "label", "start_time", "duration", "target_selector", "effect"]),
   [ENTITY_NAMES.cursorTimelinePoint]: COMMON.concat(["slide_id", "interaction_id", "time", "x_percent", "y_percent", "duration_ms", "click", "label", "source", "selector", "point_role", "sequence_index"]),
-  [ENTITY_NAMES.contentSource]: COMMON.concat(["source_type", "title", "url", "raw_text", "file_key", "file_url"])
+  [ENTITY_NAMES.contentSource]: COMMON.concat(["source_type", "title", "url", "raw_text", "file_key", "file_url", "image_preview"])
 };
 
 export interface WriteOp {

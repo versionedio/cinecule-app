@@ -33,10 +33,8 @@ jobs:
       # write access to exportasset, permission to run the render_complete logic block).
       NS_EMAIL: ${{ secrets.NS_EMAIL }}
       NS_PASSWORD: ${{ secrets.NS_PASSWORD }}
-      # Optional: with either key, picture scenes get a generated picture instead of line icons
-      # (Gemini is used first if both are set). Without a key (or if generation fails) the icons are used. See scripts/render/images.mjs.
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      ELEVENLABS_IMAGE_KEY: ${{ secrets.ELEVENLABS_IMAGE_KEY }}
+      # No image or vision provider key is needed here. Pictures (generated ones, and deciding how a viewer's own picture is
+      # shown) are made by the scene_images glyph in nostackai, which reads the tenant's own Secrets. See glyphs/scene-images.cjs.
     steps:
       - uses: actions/checkout@v5
 
