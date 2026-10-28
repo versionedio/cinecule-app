@@ -16,11 +16,14 @@ export interface Profile {
  *  1. POST /user/login (x-api-key)  -> oauthtoken response header
  *  2. GET  /token (oauthtoken + client_id) -> x-nostackai-token header + profile body
  */
+// The platform stores emails in lower case but only matches them exactly, so "Name@Mail.com" would be "not found".
+const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
 export async function login(email: string, pwd: string): Promise<Profile> {
   const step1 = await rawFetch(`/user/login`, {
     method: "POST",
     headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ email, pwd })
+    body: JSON.stringify({ email: normalizeEmail(email), pwd })
   });
   if (!step1.ok) {
     const text = await step1.text();
@@ -72,11 +75,11 @@ export function logout() {
 }
 
 export async function register(email: string, pwd: string, fn: string, ln: string) {
-  return api.post(`/user/register`, { email, pwd, fn, ln }, { "x-api-key": API_KEY });
+  return api.post(`/user/register`, { email: normalizeEmail(email), pwd, fn, ln }, { "x-api-key": API_KEY });
 }
 
 export async function forgotPassword(email: string) {
-  return api.post(`/user/forgotpwd`, { email }, { "x-api-key": API_KEY });
+  return api.post(`/user/forgotpwd`, { email: normalizeEmail(email) }, { "x-api-key": API_KEY });
 }
 
 export async function resetPassword(token: string, pwd: string) {

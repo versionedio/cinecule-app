@@ -17,6 +17,8 @@ import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowLeft, MousePointerClick } from "lucide-react";
+import { createRecord, deleteRecord, secureWrite, updateRecord } from "@/services/secureWriteService";
+import { TRANSITION_CHOICES } from "@/render/transitions";
 
 const selectCls =
   "h-10 rounded-[4px] border border-border bg-transparent px-3 text-sm text-foreground focus-visible:outline-none focus-visible:border-primary";
@@ -81,13 +83,13 @@ export default function StoryboardEditorPage() {
   const updateProjectField = async (patch: Partial<Project>) => {
     if (!project) return;
     setProject({ ...project, ...patch });
-    await entityService.update(ENTITY_NAMES.project, id, patch).catch((e) => setError(e instanceof Error ? e.message : "Save failed."));
+    await updateRecord(ENTITY_NAMES.project, id, patch).catch((e) => setError(e instanceof Error ? e.message : "Save failed."));
   };
 
   // --- Slides ---
   const addSlide = async () => {
     const maxOrder = slides.reduce((m, s) => Math.max(m, s.sort_order), -1);
-    const created = await entityService.create<GeneratedHtml>(ENTITY_NAMES.generatedHtml, {
+    const created = await createRecord<GeneratedHtml>(ENTITY_NAMES.generatedHtml, {
       project_id: id,
       name: `Slide ${slides.length + 1}`,
       html_content: '<div class="flex h-full items-center justify-center p-16"><h1 class="text-4xl font-semibold">New slide</h1></div>',
@@ -101,7 +103,7 @@ export default function StoryboardEditorPage() {
   };
 
   const deleteSlide = async (slideId: string) => {
-    await entityService.remove(ENTITY_NAMES.generatedHtml, slideId);
+    await deleteRecord(ENTITY_NAMES.generatedHtml, slideId);
     setSlides((prev) => prev.filter((s) => s.id !== slideId));
     if (activeSlideId === slideId) setActiveSlideId(slides.find((s) => s.id !== slideId)?.id ?? null);
   };
@@ -117,9 +119,10 @@ export default function StoryboardEditorPage() {
     next[swapIdx] = { ...a, sort_order: b.sort_order };
     next.sort((x, y) => x.sort_order - y.sort_order);
     setSlides(next);
-    await Promise.all([
-      entityService.update(ENTITY_NAMES.generatedHtml, a.id, { sort_order: b.sort_order }),
-      entityService.update(ENTITY_NAMES.generatedHtml, b.id, { sort_order: a.sort_order })
+    // One call for both, so a swap is never half saved.
+    await secureWrite([
+      { entity: ENTITY_NAMES.generatedHtml, op: "update", id: a.id, fields: { sort_order: b.sort_order } },
+      { entity: ENTITY_NAMES.generatedHtml, op: "update", id: b.id, fields: { sort_order: a.sort_order } }
     ]).catch((e) => setError(e instanceof Error ? e.message : "Reorder failed."));
   };
 
@@ -127,10 +130,10 @@ export default function StoryboardEditorPage() {
   const saveInteraction = async (data: Partial<Interaction>) => {
     if (!activeSlideId) return;
     if (data.id) {
-      const updated = await entityService.update<Interaction>(ENTITY_NAMES.interaction, data.id, data);
+      const updated = await updateRecord<Interaction>(ENTITY_NAMES.interaction, data.id, data);
       setInteractions((prev) => prev.map((i) => (i.id === data.id ? { ...i, ...updated } : i)));
     } else {
-      const created = await entityService.create<Interaction>(ENTITY_NAMES.interaction, {
+      const created = await createRecord<Interaction>(ENTITY_NAMES.interaction, {
         ...data, project_id: id, slide_id: activeSlideId
       });
       setInteractions((prev) => [...prev, created]);
@@ -139,7 +142,7 @@ export default function StoryboardEditorPage() {
   };
 
   const deleteInteraction = async (interactionId: string) => {
-    await entityService.remove(ENTITY_NAMES.interaction, interactionId);
+    await deleteRecord(ENTITY_NAMES.interaction, interactionId);
     setInteractions((prev) => prev.filter((i) => i.id !== interactionId));
     setFocusedSelector(null);
   };
@@ -147,37 +150,37 @@ export default function StoryboardEditorPage() {
   // --- Camera shots ---
   const createCameraShot = async (draft: Omit<CameraShot, "id" | "project_id" | "slide_id">) => {
     if (!activeSlideId) return;
-    const created = await entityService.create<CameraShot>(ENTITY_NAMES.cameraShot, { ...draft, project_id: id, slide_id: activeSlideId });
+    const created = await createRecord<CameraShot>(ENTITY_NAMES.cameraShot, { ...draft, project_id: id, slide_id: activeSlideId });
     setCameraShots((prev) => [...prev, created]);
   };
   const updateCameraShot = async (shotId: string, patch: Partial<CameraShot>) => {
     setCameraShots((prev) => prev.map((s) => (s.id === shotId ? { ...s, ...patch } : s)));
-    await entityService.update(ENTITY_NAMES.cameraShot, shotId, patch).catch(() => undefined);
+    await updateRecord(ENTITY_NAMES.cameraShot, shotId, patch).catch(() => undefined);
   };
   const deleteCameraShot = async (shotId: string) => {
-    await entityService.remove(ENTITY_NAMES.cameraShot, shotId);
+    await deleteRecord(ENTITY_NAMES.cameraShot, shotId);
     setCameraShots((prev) => prev.filter((s) => s.id !== shotId));
   };
 
   // --- Effect cues ---
   const createEffectCue = async (draft: Omit<VideoEffectCue, "id" | "project_id" | "slide_id">) => {
     if (!activeSlideId) return;
-    const created = await entityService.create<VideoEffectCue>(ENTITY_NAMES.videoEffectCue, { ...draft, project_id: id, slide_id: activeSlideId });
+    const created = await createRecord<VideoEffectCue>(ENTITY_NAMES.videoEffectCue, { ...draft, project_id: id, slide_id: activeSlideId });
     setEffectCues((prev) => [...prev, created]);
   };
   const updateEffectCue = async (cueId: string, patch: Partial<VideoEffectCue>) => {
     setEffectCues((prev) => prev.map((c) => (c.id === cueId ? { ...c, ...patch } : c)));
-    await entityService.update(ENTITY_NAMES.videoEffectCue, cueId, patch).catch(() => undefined);
+    await updateRecord(ENTITY_NAMES.videoEffectCue, cueId, patch).catch(() => undefined);
   };
   const deleteEffectCue = async (cueId: string) => {
-    await entityService.remove(ENTITY_NAMES.videoEffectCue, cueId);
+    await deleteRecord(ENTITY_NAMES.videoEffectCue, cueId);
     setEffectCues((prev) => prev.filter((c) => c.id !== cueId));
   };
 
   // --- Cursor timeline ---
   const createCursorPoint = async () => {
     if (!activeSlideId) return;
-    const created = await entityService.create<CursorTimelinePoint>(ENTITY_NAMES.cursorTimelinePoint, {
+    const created = await createRecord<CursorTimelinePoint>(ENTITY_NAMES.cursorTimelinePoint, {
       project_id: id, slide_id: activeSlideId, time: activeSlideStart, x_percent: 50, y_percent: 50,
       duration_ms: 800, source: "manual"
     });
@@ -185,10 +188,10 @@ export default function StoryboardEditorPage() {
   };
   const updateCursorPoint = async (pointId: string, patch: Partial<CursorTimelinePoint>) => {
     setCursorPoints((prev) => prev.map((p) => (p.id === pointId ? { ...p, ...patch } : p)));
-    await entityService.update(ENTITY_NAMES.cursorTimelinePoint, pointId, patch).catch(() => undefined);
+    await updateRecord(ENTITY_NAMES.cursorTimelinePoint, pointId, patch).catch(() => undefined);
   };
   const deleteCursorPoint = async (pointId: string) => {
-    await entityService.remove(ENTITY_NAMES.cursorTimelinePoint, pointId);
+    await deleteRecord(ENTITY_NAMES.cursorTimelinePoint, pointId);
     setCursorPoints((prev) => prev.filter((p) => p.id !== pointId));
   };
 
@@ -276,7 +279,7 @@ export default function StoryboardEditorPage() {
                   const duration = Number(e.target.value);
                   setSlides((prev) => prev.map((s) => (s.id === activeSlide.id ? { ...s, duration } : s)));
                 }}
-                onBlur={(e) => entityService.update(ENTITY_NAMES.generatedHtml, activeSlide.id, { duration: Number(e.target.value) })}
+                onBlur={(e) => updateRecord(ENTITY_NAMES.generatedHtml, activeSlide.id, { duration: Number(e.target.value) })}
               />
             </Field>
             <Field label="Transition">
@@ -286,11 +289,11 @@ export default function StoryboardEditorPage() {
                 onChange={(e) => {
                   const transition = e.target.value as GeneratedHtml["transition"];
                   setSlides((prev) => prev.map((s) => (s.id === activeSlide.id ? { ...s, transition } : s)));
-                  entityService.update(ENTITY_NAMES.generatedHtml, activeSlide.id, { transition });
+                  updateRecord(ENTITY_NAMES.generatedHtml, activeSlide.id, { transition });
                 }}
               >
-                {["fade", "slide-left", "slide-right", "zoom-in", "zoom-out", "flip", "none"].map((t) => (
-                  <option key={t} value={t}>{t}</option>
+                {TRANSITION_CHOICES.map((t) => (
+                  <option key={t.id} value={t.id} title={t.description}>{t.label}</option>
                 ))}
               </select>
             </Field>
@@ -301,7 +304,7 @@ export default function StoryboardEditorPage() {
                   const transition_duration = Number(e.target.value);
                   setSlides((prev) => prev.map((s) => (s.id === activeSlide.id ? { ...s, transition_duration } : s)));
                 }}
-                onBlur={(e) => entityService.update(ENTITY_NAMES.generatedHtml, activeSlide.id, { transition_duration: Number(e.target.value) })}
+                onBlur={(e) => updateRecord(ENTITY_NAMES.generatedHtml, activeSlide.id, { transition_duration: Number(e.target.value) })}
               />
             </Field>
           </div>

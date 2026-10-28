@@ -1,3 +1,4 @@
+import { themeHead } from "@/render/theme";
 import { useEffect, useMemo, useRef } from "react";
 import { GeneratedHtml, Interaction, interactionSelector } from "@/config/entities";
 
@@ -91,6 +92,7 @@ export function SlidePreview({
     () => `<!doctype html><html><head><meta charset="utf-8">
       <script src="https://cdn.tailwindcss.com"></script>
       <style>${IFRAME_STYLE}</style>
+      ${themeHead(slide.html_content || "")}
     </head><body>${slide.html_content || ""}</body></html>`,
     [slide.id, slide.html_content]
   );

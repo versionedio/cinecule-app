@@ -1,5 +1,5 @@
 {
-  "name": "cinematic-studio",
+  "name": "cinecule",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -14,7 +14,8 @@
     "lint": "eslint .",
     "render:claim": "node scripts/render/claim.mjs",
     "render": "node scripts/render/render.mjs",
-    "render:fixture": "node scripts/render/render.mjs --fixture"
+    "render:fixture": "node scripts/render/render.mjs --fixture",
+    "check:themes": "node scripts/check-themes.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.1",

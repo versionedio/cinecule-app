@@ -87,3 +87,28 @@ export const FIXTURE: RenderData = {
     { slide_id: "sl3", words: narrate("Thanks for watching, and see you next time.", 0.6) }
   ]
 };
+
+/**
+ * The themed design system on one film: every layout in one theme. Open `/render/fixture?theme=forest&bg=glow`
+ * (themes: see src/render/theme.ts). Used to look at a theme before trusting it.
+ */
+export function fixtureThemed(theme: string, bg: string, font = "theme"): RenderData {
+  const fontAttr = font && font !== "theme" ? ` data-font="${font}"` : "";
+  const root = (layout: string, inner: string, extra = "") => `<div class="cc ${layout}" data-theme="${theme}" data-bg="${bg}"${fontAttr}${extra}>${inner}</div>`;
+  const slideDefs: { id: string; html: string; text: string; transition: string }[] = [
+    { id: "t1", transition: "fade", text: "Cats have lived beside people for about nine thousand five hundred years.", html: root("cc-title", `<h1 id="t1-title" class="cc-h">Cats: <em>9,500 years</em> beside us</h1><p id="t1-sub" class="cc-sub">A short tour of the house tiger</p>`) },
+    { id: "t2", transition: "slide-left", text: "Cats are built to hunt. They see in dim light, hear ultrasound, and their whiskers sense moving air.", html: root("cc-points", `<h2 id="t2-title" class="cc-h">Built to <em>hunt</em></h2><div id="t2-card1" class="cc-card">Sees in <em>dim light</em></div><div id="t2-card2" class="cc-card">Hears <em>ultrasound</em></div><div id="t2-card3" class="cc-card">Whiskers sense <em>moving air</em></div>`) },
+    { id: "t3", transition: "zoom-in", text: "Roughly six hundred million cats live in homes and on streets worldwide.", html: root("cc-stat", `<p id="t3-label" class="cc-label">Cats worldwide</p><div id="t3-num" class="cc-num">600M</div><p id="t3-cap" class="cc-cap">live in <em>homes</em> and on <em>streets</em></p>`) },
+    { id: "t4", transition: "fade", text: "Wild cats hunt alone, while house cats nap sixteen hours a day.", html: root("cc-split", `<h2 id="t4-title" class="cc-h">Wild vs <em>home</em></h2><div class="cc-cols"><div id="t4-col1" class="cc-col"><p class="cc-label">Wild</p><p>Hunts <em>alone</em></p></div><div id="t4-col2" class="cc-col"><p class="cc-label">Home</p><p>Naps <em>16 hours</em></p></div></div>`) },
+    { id: "t5", transition: "slide-right", text: "Time spent with a cat is never wasted, wrote the author Colette.", html: root("cc-quote", `<p id="t5-q" class="cc-q">Time spent with a cat is <em>never wasted</em>.</p><p id="t5-by" class="cc-by">Colette</p>`) },
+    { id: "t6", transition: "fade", text: "Meet the cat, a small hunter who chose to live with us.", html: root("cc-picture", "", ` data-art="cat" id="t6-art"`) },
+    { id: "t7", transition: "zoom-out", text: "Small predators, big companions.", html: root("cc-closing", `<h2 id="t7-title" class="cc-h">Small predators, <em>big</em> companions</h2>`) }
+  ];
+  const audio = slideDefs.map((d) => ({ slide_id: d.id, words: narrate(d.text, 0.5) }));
+  const slides = slideDefs.map((d, i) => {
+    const end = audio[i].words[audio[i].words.length - 1].e;
+    return { ...base, id: d.id, name: `Scene ${i + 1}`, sort_order: i, duration: Math.ceil((end + 1.4) * 10) / 10, transition: d.transition, transition_duration: 0.6, narration_text: d.text, html_content: d.html };
+  }) as unknown as RenderData["slides"];
+  const interactions = [proposal("ti1", "t2", "#t2-card1", "Sees in dim light", "highlight"), proposal("ti2", "t2", "#t2-card3", "Whiskers sense moving air", "highlight")];
+  return { project: { id: "fixture", name: "Themed fixture", canvas_aspect_ratio: "16:9", director_camera_intensity: "medium" } as RenderData["project"], slides, interactions, audio };
+}

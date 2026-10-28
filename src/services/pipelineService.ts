@@ -1,5 +1,7 @@
 import { ContentSource, ENTITY_NAMES, ProjectStatus } from "@/config/entities";
 import { entityService } from "./entityService";
+import { deleteRecords, updateRecord } from "@/services/secureWriteService";
+import { nameProject } from "@/services/namingService";
 
 // URL fetch (20s cap) plus an AI research pass for query sources fits well inside this.
 export const INGEST_TIMEOUT_MS = 120_000;
@@ -57,9 +59,33 @@ export async function waitForSourcesProcessed(projectId: string, opts: WaitOptio
   }
 }
 
-/** Waits for ingestion, then moves the project into the generation pipeline exactly once. */
+// What the pipeline makes from the sources. A second run (the "Try again" button) must start from none of it:
+// the storyboard is added to whatever is already there, so leftovers would play as repeated scenes.
+// Sources and finished renders are kept. "audio" holds the narration clips and their word timings.
+const GENERATED = [
+  ENTITY_NAMES.generatedHtml,
+  ENTITY_NAMES.interaction,
+  ENTITY_NAMES.voiceover,
+  "audio",
+  ENTITY_NAMES.cameraShot,
+  ENTITY_NAMES.videoEffectCue,
+  ENTITY_NAMES.cursorTimelinePoint
+];
+
+async function clearGenerated(projectId: string) {
+  for (const entity of GENERATED) {
+    const rows = await entityService.listAll<{ id: string }>(entity, { project_id: projectId });
+    const notRemoved = await deleteRecords(entity, rows.map((r) => r.id));
+    if (notRemoved > 0) throw new Error("Couldn't clear the earlier attempt. Try again in a moment.");
+  }
+}
+
+/** Waits for ingestion, clears any earlier attempt, then moves the project into the generation pipeline exactly once. */
 export async function startPipeline(projectId: string, opts: WaitOptions = {}) {
   await waitForSourcesProcessed(projectId, opts);
+  // Now that links and files have been read, the title can be written from what they actually say.
+  nameProject(projectId);
+  await clearGenerated(projectId);
   const next: ProjectStatus = "generating_content";
-  await entityService.update(ENTITY_NAMES.project, projectId, { status: next });
+  await updateRecord(ENTITY_NAMES.project, projectId, { status: next });
 }

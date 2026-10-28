@@ -3,21 +3,33 @@
 //   slide's start) -> upload -> render_complete.
 //
 //   node scripts/render/render.mjs --asset <exportasset id> [--dry-run --out file.mp4] [--debug] [--no-art]   (--debug burns timing info into the frames; --no-art turns off picture-scene icons)
-//   node scripts/render/render.mjs --fixture [--res 1920x1080] [--fps 30] [--max-seconds 6]   (no login, no upload)
+//   node scripts/render/render.mjs --fixture [--theme forest --bg glow] [--res 1920x1080] [--fps 30] [--max-seconds 6]   (no login, no upload; --theme shows the themed layouts)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { client, login } from "./lib.mjs";
+import { generateSceneImages, prepareUserImages, treatUserImage } from "./images.mjs";
 
 const DIST = path.resolve("dist");
-// The platform rejects uploads above the plan's limit (10 MB here); aim a little under it.
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 10 * 1024 * 1024;
+// There is no upload limit on the current plan, so videos are encoded for quality, not size.
+// Set MAX_UPLOAD_BYTES (e.g. 10485760) to bring the size cap back if a plan ever has one again.
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 0;
 const TARGET_BYTES = Math.floor(MAX_UPLOAD_BYTES * 0.9);
-const AUDIO_KBPS = 96;
+const AUDIO_KBPS = MAX_UPLOAD_BYTES ? 96 : 160;
+// Time estimates, from real GitHub runs: a 1080p, 30 fps frame takes about 0.07 s to draw and capture
+// (3036 frames took about 213 s). Keep these in step with src/components/common/RenderProgress.tsx.
+const PER_FRAME_SEC = 0.07;
+const FINISH_SEC = 60; // closing the encoder, then uploading and publishing the video
+const PICTURES_SEC = 60; // generating pictures for picture scenes (they run in parallel)
+const frameSeconds = (frames, resolution) => {
+  const [w, h] = String(resolution).split("x").map(Number);
+  return frames * PER_FRAME_SEC * (w > 0 && h > 0 ? (w * h) / (1920 * 1080) : 1);
+};
 // Default id of the get_voiceover_audio glyph; override with GLYPH_AUDIO_ID if it is ever recreated.
 const AUDIO_GLYPH_ID = process.env.GLYPH_AUDIO_ID || "e94f67d5-30a9-476e-b830-4849cb359083";
 const TOKEN_KEY = "cinecule.token";
@@ -32,16 +44,36 @@ function parseArgs(argv) {
   return out;
 }
 
-function serveDist() {
+function serveDist(genDir) {
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".woff2": "font/woff2" };
   const server = http.createServer((req, res) => {
     const pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+    // Generated pictures live outside dist, in a per-render folder.
+    if (genDir && pathname.startsWith("/__gen/")) {
+      const gen = path.join(genDir, path.basename(pathname));
+      if (!fs.existsSync(gen)) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { "Content-Type": types[path.extname(gen)] || (path.extname(gen) === ".jpg" ? "image/jpeg" : path.extname(gen) === ".webp" ? "image/webp" : "application/octet-stream") });
+      return fs.createReadStream(gen).pipe(res);
+    }
     let file = path.join(DIST, pathname);
     if (!file.startsWith(DIST) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(DIST, "index.html");
     res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" });
     fs.createReadStream(file).pipe(res);
   });
   return new Promise((resolve) => server.listen(0, () => resolve({ server, port: server.address().port })));
+}
+
+// A render may ask for its own shape (asset.aspect_ratio); a queued asset without one is the project's own shape.
+// The asset's resolution says how big (its longer side by its shorter), and the shape decides which way round.
+const SHAPES = ["16:9", "9:16", "1:1"];
+function shapedResolution(resolution, aspect) {
+  const [w, h] = String(resolution).split("x").map(Number);
+  if (!(w > 0 && h > 0) || !SHAPES.includes(aspect)) return resolution;
+  const long = Math.max(w, h);
+  const short = Math.min(w, h);
+  if (aspect === "9:16") return `${short}x${long}`;
+  if (aspect === "1:1") return `${short}x${short}`;
+  return `${long}x${short}`;
 }
 
 const run = (cmd, args) =>
@@ -53,8 +85,8 @@ const run = (cmd, args) =>
   });
 
 // Optional render-page switches: ?debug=1 burns timing info into frames, ?art=0 turns off picture-scene icons.
-function renderQuery({ debug, art }) {
-  const q = [debug ? "debug=1" : "", art ? "" : "art=0"].filter(Boolean).join("&");
+function renderQuery({ debug, art, theme, bg, aspect, userimage, strict }) {
+  const q = [strict ? "strict=1" : "", aspect ? `aspect=${encodeURIComponent(aspect)}` : "", userimage ? "userimage=1" : "", debug ? "debug=1" : "", art ? "" : "art=0", theme ? `theme=${encodeURIComponent(theme)}` : "", theme && bg ? `bg=${encodeURIComponent(bg)}` : ""].filter(Boolean).join("&");
   return q ? `?${q}` : "";
 }
 
@@ -66,7 +98,29 @@ function printDecisions(decisions = []) {
   for (const d of decisions) console.log(`  ${d.status === "kept" ? "+" : "-"} ${d.scene} ${d.selector || d.id}: ${d.reason}`);
 }
 
-/** audioClips: [{ file, start }] with `start` in seconds from the beginning of the video. */
+
+// Sounds under scene transitions (see scripts/render/sfx/sfx.json). A transition is a move of `enter` seconds ending as the
+// scene starts, so its sound is placed with its loudest moment at the middle of that move, where the motion is fastest.
+const SFX_DIR = fileURLToPath(new URL("./sfx/", import.meta.url));
+function transitionSfx(info) {
+  if (process.env.NO_SFX === "1" || process.argv.includes("--no-sfx")) return [];
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(SFX_DIR, "sfx.json"), "utf8"));
+  } catch {
+    return []; // sounds are a nicety: a missing manifest must never stop a render
+  }
+  const clips = [];
+  for (const s of info.slides ?? []) {
+    if (!s.enter || !s.transition || s.transition === "none") continue;
+    const entry = manifest.files[manifest.forTransition[s.transition]];
+    if (!entry || !fs.existsSync(path.join(SFX_DIR, entry.file))) continue;
+    clips.push({ file: path.join(SFX_DIR, entry.file), start: Math.max(0, s.start - s.enter / 2 - entry.peakAt), gain: entry.gain });
+  }
+  return clips;
+}
+
+/** audioClips: [{ file, start, gain? }] with `start` in seconds from the beginning of the video. */
 async function renderVideo({ url, token, resolution, fps, audioClips, outFile, maxSeconds, onProgress = () => {} }) {
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage", "--force-color-profile=srgb"] });
   try {
@@ -94,20 +148,22 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
 
     const duration = maxSeconds ? Math.min(info.duration, maxSeconds) : info.duration;
     const frames = Math.max(1, Math.round(duration * fps));
-    const clips = (await audioClips(info)).filter((c) => c.start < duration);
+    const sfx = transitionSfx(info);
+    if (sfx.length) console.log(`Transition sounds: ${sfx.map((c) => `${path.basename(c.file, ".mp3")}@${c.start.toFixed(2)}s`).join(", ")}`);
+    const clips = [...(await audioClips(info)), ...sfx].filter((c) => c.start < duration);
 
     const args = ["-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(fps), "-c:v", "mjpeg", "-i", "-"];
     clips.forEach((c) => args.push("-i", c.file));
     const filters = ["[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v]"];
     if (clips.length) {
-      clips.forEach((c, i) => filters.push(`[${i + 1}:a]aresample=44100,adelay=${Math.round(c.start * 1000)}|${Math.round(c.start * 1000)}[a${i}]`));
+      clips.forEach((c, i) => filters.push(`[${i + 1}:a]aresample=44100,volume=${c.gain ?? 1},adelay=${Math.round(c.start * 1000)}|${Math.round(c.start * 1000)}[a${i}]`));
       filters.push(`${clips.map((_, i) => `[a${i}]`).join("")}amix=inputs=${clips.length}:normalize=0:duration=longest[aout]`);
     }
     args.push("-filter_complex", filters.join(";"), "-map", "[v]");
     if (clips.length) args.push("-map", "[aout]", "-c:a", "aac", "-b:a", `${AUDIO_KBPS}k`);
-    // Quality-based, but capped so the file always fits the plan's upload limit (speech and flat graphics need far less than 1080p video usually gets).
-    const videoKbps = Math.max(250, Math.floor((TARGET_BYTES * 8) / 1000 / duration - AUDIO_KBPS));
-    args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", "20", "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
+    // Quality-based. Only when a size cap is configured is the video bitrate limited to fit it.
+    const cap = MAX_UPLOAD_BYTES ? (() => { const kbps = Math.max(250, Math.floor((TARGET_BYTES * 8) / 1000 / duration - AUDIO_KBPS)); return ["-maxrate", `${kbps}k`, "-bufsize", `${kbps * 2}k`]; })() : [];
+    args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", MAX_UPLOAD_BYTES ? "20" : "18", ...cap, "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
 
     const ff = spawn("ffmpeg", args, { stdio: ["pipe", "ignore", "pipe"] });
     let ffErr = "";
@@ -150,11 +206,31 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
 async function runFixture(args) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "render-fixture-"));
   const outFile = path.resolve(args.out || "render-fixture.mp4");
-  const { server, port } = await serveDist();
+  // --photo <file> stands in for a generated picture on the fixture's picture scene (no image key needed).
+  const genDir = path.join(tmp, "gen");
+  if (args.photo && typeof args.photo === "string") {
+    fs.mkdirSync(genDir, { recursive: true });
+    const name = `slp${path.extname(args.photo) || ".png"}`;
+    fs.copyFileSync(args.photo, path.join(genDir, name));
+    fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify({ slp: `/__gen/${name}` }));
+  }
+  // --user-image <file> (with --theme) stands in for a viewer's own picture on the themed fixture's picture scene.
+  const userImage = typeof args["user-image"] === "string" ? args["user-image"] : "";
+  if (userImage) {
+    fs.mkdirSync(genDir, { recursive: true });
+    const copy = path.join(genDir, `user-t6${path.extname(userImage) || ".png"}`);
+    fs.copyFileSync(userImage, copy);
+    const [w, h] = String(args.res || "1920x1080").split("x").map(Number);
+    const shaped = args.aspect === "9:16" ? { width: Math.min(w, h), height: Math.max(w, h) } : args.aspect === "1:1" ? { width: Math.min(w, h), height: Math.min(w, h) } : { width: Math.max(w, h), height: Math.min(w, h) };
+    const given = typeof args["user-image-answer"] === "string" ? JSON.parse(args["user-image-answer"]) : null;
+    const treated = await treatUserImage({ file: copy, narration: "Meet the cat, a small hunter who chose to live with us.", canvas: shaped, label: "t6", answer: given });
+    fs.writeFileSync(path.join(genDir, "user-images.json"), JSON.stringify({ t6: treated }));
+  }
+  const { server, port } = await serveDist(genDir);
   try {
     const res = await renderVideo({
-      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"] })}`,
-      resolution: args.res || "1920x1080",
+      url: `http://localhost:${port}/render/fixture${renderQuery({ debug: Boolean(args.debug), art: !args["no-art"], userimage: Boolean(userImage), strict: Boolean(args.strict), aspect: typeof args.aspect === "string" ? args.aspect : undefined, theme: typeof args.theme === "string" ? args.theme : undefined, bg: typeof args.bg === "string" ? args.bg : undefined })}`,
+      resolution: shapedResolution(args.res || "1920x1080", typeof args.aspect === "string" ? args.aspect : undefined),
       fps: Number(args.fps) || 30,
       maxSeconds: args["max-seconds"] ? Number(args["max-seconds"]) : undefined,
       outFile,
@@ -174,6 +250,26 @@ async function runFixture(args) {
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/**
+ * Uploads the video as free-form content and publishes it, returning a public URL that works on any
+ * domain. The response shapes are read defensively, and what came back is printed if a step is missing,
+ * so a mismatch is obvious in the run log.
+ */
+async function uploadPublicVideo(api, file, size, name) {
+  const qs = new URLSearchParams({ contentType: "video/mp4", fileExtension: "mp4", contentLength: String(size), filename: name, name }).toString();
+  const up = await api.get(`/content/uploadurl?${qs}`);
+  const uploadUrl = up?.uploadUrl ?? up?.url;
+  if (!uploadUrl) throw new Error(`content/uploadurl returned no upload address (got keys: ${Object.keys(up ?? {}).join(", ") || "none"})`);
+  const put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(file) });
+  if (!put.ok) throw new Error(`content upload failed (${put.status})`);
+  const contentId = up?.contentId ?? up?.id ?? up?.content?.id;
+  if (!contentId) throw new Error(`content/uploadurl returned no content id (got keys: ${Object.keys(up ?? {}).join(", ")})`);
+  const pub = await api.post(`/content/${contentId}/publish`);
+  const publicUrl = pub?.publicUrl;
+  if (!publicUrl) throw new Error(`publish returned no public link (got keys: ${Object.keys(pub ?? {}).join(", ") || "none"})`);
+  return publicUrl;
 }
 
 // dryRun: render to `out` and stop — no upload, no status changes (the asset is only read).
@@ -197,10 +293,18 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
   try {
     const asset = await api.get(`/item/exportasset/${assetId}`);
     const projectId = asset.project_id;
-    const resolution = asset.resolution || "1920x1080";
+    const aspect = SHAPES.includes(asset.aspect_ratio) ? asset.aspect_ratio : undefined;
+    const resolution = shapedResolution(asset.resolution || "1920x1080", aspect);
     const fps = Number(asset.frame_rate) || 30;
-    console.log(`Asset ${assetId}: project ${projectId}, ${resolution} @ ${fps} fps`);
-    await report({ stage: "Preparing", pct: 3, eta: 120 });
+    console.log(`Asset ${assetId}: project ${projectId}, ${aspect ?? "project shape"}, ${resolution} @ ${fps} fps`);
+    // How long this film should take from here, so the countdown starts at a realistic number instead of a guess.
+    const slides = await api.list("generatedhtml", { project_id: projectId });
+    const videoSec = slides.reduce((t, sl) => t + (Number(sl.duration) || 0), 0);
+    const framesSec = frameSeconds(videoSec * fps, resolution);
+    const hasPictures = slides.some((sl) => /data-(?:art|image-source)\s*=\s*["']/.test(String(sl.html_content ?? "")));
+    const picturesSec = hasPictures ? PICTURES_SEC : 0;
+    const remaining = () => Math.round(framesSec + picturesSec + FINISH_SEC);
+    await report({ stage: "Preparing", pct: 3, eta: remaining() + 15 });
 
     // Voiceover clips, fetched as base64 through the get_voiceover_audio glyph endpoint.
     const audios = await api.list("audio", { project_id: projectId, kind: "voiceover" });
@@ -214,12 +318,24 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
       clipFiles.set(a.slide_id, file);
     }
     console.log(`Fetched ${clipFiles.size} voiceover clip(s).`);
-    await report({ stage: "Starting the render", pct: 8, eta: 100 });
 
-    const served = await serveDist();
+    // Real pictures for picture scenes, made by the scene_images glyph in nostackai (it holds the provider keys; none are on
+    // GitHub). If one can't be made (no key set there, a limit, a failure) the render FAILS with the reason: there is no
+    // fallback to icons or an empty frame.
+    await report({ stage: hasPictures ? "Creating pictures" : "Preparing", pct: 5, eta: remaining() });
+    const genDir = path.join(tmp, "gen");
+    const [canvasW, canvasH] = resolution.split("x").map(Number);
+    const photos = await generateSceneImages({ slides, dir: genDir, api, aspectRatio: canvasW === canvasH ? "1:1" : canvasW > canvasH ? "16:9" : "9:16" });
+    if (Object.keys(photos).length > 0) fs.writeFileSync(path.join(genDir, "photos.json"), JSON.stringify(photos));
+    // The viewer's own pictures, each shown whole or cropped to its subject for THIS render's shape.
+    const userImages = await prepareUserImages({ slides, projectId, api, dir: genDir, canvas: { width: canvasW, height: canvasH } });
+    if (Object.keys(userImages).length > 0) fs.writeFileSync(path.join(genDir, "user-images.json"), JSON.stringify(userImages));
+    await report({ stage: "Starting the render", pct: 8, eta: Math.round(framesSec + FINISH_SEC) });
+
+    const served = await serveDist(genDir);
     server = served.server;
     const result = await renderVideo({
-      url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art })}`,
+      url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art, aspect, strict: true })}`,
       token,
       resolution,
       fps,
@@ -235,7 +351,7 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
 
     // Upload through the platform's presigned URL for exportasset.file_key.
     let size = fs.statSync(outFile).size;
-    if (size > MAX_UPLOAD_BYTES) {
+    if (MAX_UPLOAD_BYTES && size > MAX_UPLOAD_BYTES) {
       // Still over the plan limit: re-encode the finished file at a lower video bitrate.
       await report({ stage: "Compressing", pct: 93, eta: 40 });
       const squeezed = outFile.replace(/\.mp4$/, "") + ".small.mp4";
@@ -246,12 +362,25 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
       if (size > MAX_UPLOAD_BYTES) throw new Error(`Video is ${(size / 1e6).toFixed(1)} MB, over the ${(MAX_UPLOAD_BYTES / 1e6).toFixed(1)} MB upload limit even after compressing.`);
     }
     await report({ stage: "Uploading", pct: 94, eta: 12 });
-    const up = await api.get(`/uploadurl/exportasset/file_key?contentType=video/mp4&fileExtension=mp4&contentLength=${size}`);
-    const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(outFile) });
-    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-    await api.put(`/update/exportasset/${assetId}`, { file_key: up.s3Key, cdn_url: up.cdnUrl, stage: "Done", progress_pct: 100, eta_sec: 0 });
-    await complete({ success: true, cdn_url: up.cdnUrl, duration_sec: Number(result.duration.toFixed(2)) });
-    console.log(`Done: ${(size / 1e6).toFixed(1)} MB uploaded to ${up.s3Key}`);
+    // A video must play on any device. Files in an entity file field are private and need cookies that
+    // other devices (Safari, Firefox, phones) block, so the video goes up as published content with a
+    // public link. If that path fails for any reason, fall back to the private upload so a render never fails here.
+    let videoUrl;
+    let fileKey;
+    try {
+      videoUrl = await uploadPublicVideo(api, outFile, size, `video-${assetId}.mp4`);
+      console.log(`Published publicly: ${videoUrl}`);
+    } catch (e) {
+      console.warn(`Public upload failed (${e?.message || e}); falling back to the private upload. The video will only play in browsers signed in to nostackai.`);
+      const up = await api.get(`/uploadurl/exportasset/file_key?contentType=video/mp4&fileExtension=mp4&contentLength=${size}`);
+      const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await fs.openAsBlob(outFile) });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      videoUrl = up.cdnUrl;
+      fileKey = up.s3Key;
+    }
+    await api.put(`/update/exportasset/${assetId}`, { ...(fileKey ? { file_key: fileKey } : {}), cdn_url: videoUrl, stage: "Done", progress_pct: 100, eta_sec: 0 });
+    await complete({ success: true, cdn_url: videoUrl, duration_sec: Number(result.duration.toFixed(2)) });
+    console.log(`Done: ${(size / 1e6).toFixed(1)} MB at ${videoUrl}`);
   } catch (e) {
     console.error("Render failed:", e);
     if (!dryRun) await complete({ success: false, error_message: String(e?.message || e).slice(0, 400) }).catch((err) => console.error("Could not report failure:", err.message));

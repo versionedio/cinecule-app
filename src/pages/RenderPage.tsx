@@ -3,11 +3,13 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { entityService } from "@/services/entityService";
 import { ENTITY_NAMES, GeneratedHtml, Interaction, Project } from "@/config/entities";
 import {
-  ActiveEffect, RenderData, SlideTiming, buildSlideTimings, cameraAt, cameraTransform, canvasSize,
+  ActiveEffect, RenderData, SlideTiming, UserImage, buildSlideTimings, cameraAt, cameraTransform, canvasSize,
   clamp, easeOut, slideStateAt
 } from "@/render/timeline";
 import { Box, Decision, Intensity, Measured, PlannedEffect, PlannedReveal, Proposal, ScenePlan, WordTiming, planEffectsAt, planReveals, planScene, revealProgress } from "@/render/director";
-import { FIXTURE } from "@/render/fixture";
+import { FIXTURE, fixtureThemed } from "@/render/fixture";
+import { themeHead } from "@/render/theme";
+import { Pose, isCut, transitionFrames, transitionSeconds } from "@/render/transitions";
 import { ArtIndex, buildIndex, findArtSlots, insertArt, loadCatalog, pickArt, resolveSubject } from "@/render/art";
 
 /**
@@ -34,6 +36,7 @@ declare global {
   }
 }
 
+// The accent of older, self-styled slides; themed slides supply their own (--accent-rgb).
 const ACCENT = "242,181,74";
 // Slide HTML may carry its own CSS animation; freeze it so a frame depends only on `t`.
 const FREEZE_CSS = "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}html,body{margin:0;height:100%;overflow:hidden}";
@@ -44,6 +47,30 @@ function parseWords(json: unknown): WordTiming[] {
     return Array.isArray(parsed) ? parsed.filter((w) => w && typeof w.w === "string" && Number.isFinite(w.s)) : [];
   } catch {
     return [];
+  }
+}
+
+/** Pictures the render script generated for this render, if any. Anywhere else the request just fails. */
+async function loadPhotos(): Promise<Record<string, string>> {
+  try {
+    const res = await fetch("/__gen/photos.json");
+    if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return {};
+    const json = await res.json();
+    return json && typeof json === "object" ? (json as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The viewer's own pictures the render script saved for this render (how each is shown), if any. */
+async function loadUserImages(): Promise<Record<string, UserImage>> {
+  try {
+    const res = await fetch("/__gen/user-images.json");
+    if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return {};
+    const json = await res.json();
+    return json && typeof json === "object" ? (json as Record<string, UserImage>) : {};
+  } catch {
+    return {};
   }
 }
 
@@ -67,17 +94,24 @@ interface Layer {
   timing: SlideTiming;
   index: number;
   root: HTMLDivElement;
-  // Slow always-on drift underneath everything, so no scene is ever frozen.
+  // A wrapper kept still. (It once carried a slow whole-scene drift that made every word and picture creep.)
   ambient: HTMLDivElement;
   camera: HTMLDivElement;
   frame: HTMLIFrameElement;
   loaded: Promise<void>;
   plan: ScenePlan;
   words: WordTiming[];
+  // How long the transition into this scene lasts (0 for the first scene or a hard cut). Its opening content starts
+  // arriving this much earlier, so it is already coming in as the old scene leaves.
+  enter: number;
   // Blocks of content that arrive when the narrator reaches them.
   reveals: { el: HTMLElement; plan: PlannedReveal }[];
   // Clip art, placed in free space and arriving with the word it illustrates.
-  arts: { el: HTMLElement; start: number; shapes: SVGElement[] }[];
+  arts: { el: HTMLElement; start: number; shapes: SVGElement[]; photo?: boolean }[];
+  // The slide's accent colour as "r,g,b", so highlights and icons match its theme.
+  accent: string;
+  // The generated picture of a picture scene, so its loading can be awaited before any frame is drawn.
+  photoImg?: HTMLImageElement;
   // A picture scene: one big icon drawn on, no text.
   hero: boolean;
   // Inline styles of elements an effect touched, so each frame starts clean.
@@ -175,6 +209,27 @@ function anchorToElement(el: HTMLElement) {
   if (el.namespaceURI === "http://www.w3.org/2000/svg") el.style.transformBox = "fill-box";
 }
 
+// The measured box of a word spans the font's full ascent and descent, which on a tall font (Poppins, for one) reaches
+// well below the letters and, with tight line spacing, into the next line. Underlines are therefore placed from the
+// baseline: the box bottom minus the font's real descent is where the letters sit.
+const descentCache = new Map<string, number>();
+function descentOf(el: Element): number {
+  const view = el.ownerDocument.defaultView;
+  if (!view) return 0;
+  const cs = view.getComputedStyle(el);
+  const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  let d = descentCache.get(font);
+  if (d === undefined) {
+    const size = parseFloat(cs.fontSize) || 16;
+    const m = el.ownerDocument.createElement("canvas").getContext("2d");
+    if (m) m.font = font;
+    // fontBoundingBoxDescent is what the browser used to build the word box; fall back to a typical share of the size.
+    d = (m && m.measureText("Hxg").fontBoundingBoxDescent) || size * 0.25;
+    descentCache.set(font, d);
+  }
+  return d;
+}
+
 function applyEffect(layer: Layer, fx: ActiveEffect) {
   const doc = layer.frame.contentDocument;
   if (!doc?.body) return;
@@ -197,16 +252,21 @@ function applyEffect(layer: Layer, fx: ActiveEffect) {
     case "glow":
       // drop-shadow follows the actual shape (letters or a card's outline), unlike a rectangular box-shadow.
       touch(layer, el);
-      el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${ACCENT},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${ACCENT},${0.55 * e}))`;
+      el.style.filter = `drop-shadow(0 0 ${12 * e}px rgba(${layer.accent},${0.9 * e})) drop-shadow(0 0 ${28 * e}px rgba(${layer.accent},${0.55 * e}))`;
       break;
-    case "underline":
-      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom + 4}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${ACCENT});opacity:${e};z-index:999;`));
+    case "underline": {
+      // Just below the letters (a little more for bigger type), never down in the next line.
+      const size = parseFloat(getComputedStyle(el).fontSize) || 40;
+      const gap = Math.max(5, size * 0.12);
+      const descent = descentOf(el);
+      rects.forEach((q) => overlay(doc, `left:${q.left}px;top:${q.bottom - descent + gap}px;width:${q.width * grow}px;height:6px;border-radius:3px;background:rgb(${layer.accent});opacity:${e};z-index:999;`));
       break;
+    }
     case "circle":
-      rects.forEach((q) => overlay(doc, `${boxOf(q, 18)}border:5px solid rgb(${ACCENT});border-radius:${q.width > q.height * 3 ? "999px" : "50%"};opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
+      rects.forEach((q) => overlay(doc, `${boxOf(q, 18)}border:5px solid rgb(${layer.accent});border-radius:${q.width > q.height * 3 ? "999px" : "50%"};opacity:${e};clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
     case "wipe-reveal":
-      rects.forEach((q) => overlay(doc, `${boxOf(q, 6)}background:rgba(${ACCENT},${0.34 * e});border-radius:8px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
+      rects.forEach((q) => overlay(doc, `${boxOf(q, 6)}background:rgba(${layer.accent},${0.34 * e});border-radius:8px;clip-path:inset(0 ${100 * (1 - grow)}% 0 0);z-index:999;`));
       break;
     default:
       break;
@@ -222,9 +282,9 @@ function applyFollow(layer: Layer, planned: PlannedEffect, fx: ActiveEffect, loc
     const span = spans[tok.index];
     if (!span) continue;
     if (local >= tok.s && local < tok.e) {
-      span.style.cssText = `background:rgba(${ACCENT},${0.55 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${ACCENT},${0.55 * e});`;
+      span.style.cssText = `background:rgba(${layer.accent},${0.55 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${layer.accent},${0.55 * e});`;
     } else if (local >= tok.e) {
-      span.style.cssText = `background:rgba(${ACCENT},${0.2 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${ACCENT},${0.2 * e});`;
+      span.style.cssText = `background:rgba(${layer.accent},${0.2 * e});border-radius:6px;box-shadow:0 0 0 5px rgba(${layer.accent},${0.2 * e});`;
     }
   }
 }
@@ -243,19 +303,48 @@ function buildLayer(host: HTMLElement, timing: SlideTiming, index: number, width
   // Listen before srcdoc is set: a fresh iframe's blank document already reads "complete", so
   // readyState can't be trusted, and a late listener could miss the real load.
   const loaded = new Promise<void>((resolve) => frame.addEventListener("load", () => resolve(), { once: true }));
-  frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.tailwindcss.com"></script><style>${FREEZE_CSS}</style></head><body>${timing.slide.html_content || ""}<div id="__fx"></div></body></html>`;
+  frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.tailwindcss.com"></script><style>${FREEZE_CSS}</style>${themeHead(timing.slide.html_content || "")}</head><body>${timing.slide.html_content || ""}<div id="__fx"></div></body></html>`;
   camera.appendChild(frame);
   ambient.appendChild(camera);
   root.appendChild(ambient);
   host.appendChild(root);
-  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], reveals: [], arts: [], hero: false, original: new Map(), followSpans: new Map() };
+  return { timing, index, root, ambient, camera, frame, loaded, plan: { shots: [], effects: [], decisions: [] }, words: [], enter: 0, reveals: [], arts: [], hero: false, accent: ACCENT, original: new Map(), followSpans: new Map() };
 }
 
 /** Once a slide has loaded, let the director decide what really happens in it. */
-function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null) {
+/**
+ * The viewer's picture as a full-frame element. "focus" shows only the cropped part. "whole" shows everything: where the
+ * picture's shape differs from the frame's, it sits fully inside the frame on a blurred, darkened copy of itself.
+ */
+function buildUserImage(doc: Document, mine: UserImage, frameAspect: number): { box: HTMLDivElement; main: HTMLImageElement } {
+  const box = doc.createElement("div");
+  box.id = "__user-image";
+  box.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden;opacity:0;pointer-events:none;");
+  const main = doc.createElement("img");
+  main.src = mine.url;
+  const crop = mine.treatment === "focus" ? mine.crop : undefined;
+  if (crop && crop.w > 0 && crop.h > 0) {
+    main.setAttribute("style", `position:absolute;max-width:none;width:${(100 / crop.w).toFixed(3)}%;height:${(100 / crop.h).toFixed(3)}%;left:${((-crop.x / crop.w) * 100).toFixed(3)}%;top:${((-crop.y / crop.h) * 100).toFixed(3)}%;`);
+  } else if (Math.abs(mine.aspect - frameAspect) / frameAspect < 0.05) {
+    main.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;");
+  } else {
+    const back = doc.createElement("img");
+    back.src = mine.url;
+    back.setAttribute("style", "position:absolute;left:-6%;top:-6%;width:112%;height:112%;object-fit:cover;filter:blur(36px) brightness(.55);");
+    box.appendChild(back);
+    main.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;");
+  }
+  box.appendChild(main);
+  return { box, main };
+}
+
+function planLayer(layer: Layer, data: RenderData, width: number, height: number, art: ArtIndex | null, strict = false) {
   const doc = layer.frame.contentDocument;
   if (!doc?.body) return;
   const slide = layer.timing.slide;
+  const themed = doc.querySelector("[data-theme]");
+  const themeAccent = themed ? getComputedStyle(themed).getPropertyValue("--accent-rgb").trim() : "";
+  if (themeAccent) layer.accent = themeAccent;
   const words = data.audio.find((a) => a.slide_id === slide.id)?.words ?? [];
   const proposals: Proposal[] = data.interactions
     .filter((i) => i.slide_id === slide.id)
@@ -274,7 +363,30 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
   // evenly sized and centred, and nothing else is on screen.
   const artDecisions: Decision[] = [];
   const heroEl = doc.querySelector<HTMLElement>("[data-art]");
-  if (heroEl) {
+  const photoUrl = data.photos?.[slide.id];
+  const mine = data.userImages?.[slide.id];
+  if (strict && doc.querySelector("[data-image-source]") && !mine) throw new Error(`Scene ${layer.index + 1} shows the viewer's picture, but it was not prepared.`);
+  if (strict && heroEl && !photoUrl && !mine) throw new Error(`Scene ${layer.index + 1} is a picture scene, but its picture was not made.`);
+  if (mine && doc.querySelector("[data-image-source]")) {
+    // The viewer's own picture, full frame: all of it, or cropped to its subject (decided by the render script).
+    layer.hero = true;
+    const { box, main } = buildUserImage(doc, mine, width / height);
+    doc.body.appendChild(box);
+    layer.photoImg = main;
+    layer.arts.push({ el: box, start: 0.2, shapes: [], photo: true });
+    artDecisions.push({ id: "art:user-image", selector: "", status: "kept", reason: `shows the viewer's picture, ${mine.treatment}${mine.reason ? ` (${mine.reason})` : ""}` });
+  } else if (heroEl && photoUrl) {
+    // A real picture, full frame, replaces the icons.
+    layer.hero = true;
+    const img = doc.createElement("img");
+    img.id = "__art-photo";
+    img.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;opacity:0;pointer-events:none;");
+    img.src = photoUrl;
+    doc.body.appendChild(img);
+    layer.photoImg = img;
+    layer.arts.push({ el: img, start: 0.2, shapes: [], photo: true });
+    artDecisions.push({ id: "art:photo", selector: "", status: "kept", reason: `picture scene shows a generated picture (${photoUrl})` });
+  } else if (heroEl) {
     layer.hero = true;
     const subject = heroEl.getAttribute("data-art") ?? "";
     const names: string[] = [];
@@ -291,7 +403,7 @@ function planLayer(layer: Layer, data: RenderData, width: number, height: number
     if (art && rects.length > 0) {
       rects.forEach((rect, i) => {
         const start = 0.3 + i * 0.7;
-        const el = insertArt(doc, art, { name: names[i], word: subject, start, score: 10 }, rect, i);
+        const el = insertArt(doc, art, { name: names[i], word: subject, start, score: 10 }, rect, i, layer.accent);
         layer.arts.push({ el, start, shapes: Array.from(el.querySelectorAll<SVGElement>("path,line,polyline,polygon,circle,rect,ellipse")) });
         artDecisions.push({ id: `art:${names[i]}`, selector: "", status: "kept", reason: `picture scene icon ${i + 1} of ${rects.length}: ${names[i]}` });
       });
@@ -337,7 +449,7 @@ function findBlocks(doc: Document, width: number, height: number): HTMLElement[]
   const visit = (parent: Element) => {
     for (const child of Array.from(parent.children)) {
       const el = child as HTMLElement;
-      if (el.id.startsWith("__") || el.hasAttribute("data-art")) continue; // the effects layer and clip art manage themselves
+      if (el.id.startsWith("__") || el.hasAttribute("data-art") || el.hasAttribute("data-image-source")) continue; // the effects layer and clip art manage themselves
       if (el.id) {
         const r = el.getBoundingClientRect();
         const big = (r.width * r.height) / (width * height) > 0.7;
@@ -352,23 +464,21 @@ function findBlocks(doc: Document, width: number, height: number): HTMLElement[]
   return out;
 }
 
-function poseLayer(layer: Layer, local: number, width: number, height: number) {
-  layer.camera.style.transform = cameraTransform(cameraAt(layer.plan.shots, local), width, height);
+function poseLayer(layer: Layer, local: number, width: number, height: number, flat = false) {
+  layer.camera.style.transform = flat ? "none" : cameraTransform(cameraAt(layer.plan.shots, local), width, height);
 
-  // Slow drift: alternate scenes push in and pull out, with a small sideways glide. Small enough to
-  // stay inside the slide's padding, so it can never crop content.
-  const total = Math.max(1, layer.timing.end - layer.timing.start);
-  const p = clamp(local / total, 0, 1);
-  const dir = layer.hero || layer.index % 2 === 0 ? 1 : -1;
-  const amp = layer.hero ? 0.09 : 0.04; // a picture scene has nothing to crop, so it can push in further
-  const scale = dir > 0 ? 1 + amp * p : 1 + amp - amp * p;
-  const glideX = (layer.index % 3 === 0 ? -1 : 1) * 0.012 * width * (p - 0.5);
-  const glideY = (layer.index % 2 === 0 ? 1 : -1) * 0.006 * height * (p - 0.5);
-  layer.ambient.style.transform = `translate(${glideX.toFixed(2)}px, ${glideY.toFixed(2)}px) scale(${scale.toFixed(4)})`;
+  // Nothing drifts on its own. Words and pictures hold perfectly still unless the director plans a move (the camera
+  // shots above) or a cue lands on them. Only the drawn icons idle, further down.
+  layer.ambient.style.transform = "none";
 
   resetEffects(layer);
   // Picture: the icon is drawn on stroke by stroke, then idles gently.
-  for (const { el, start, shapes } of layer.arts) {
+  for (const { el, start, shapes, photo } of layer.arts) {
+    if (photo) {
+      // A picture fades in and then holds perfectly still.
+      el.style.opacity = easeOut(clamp((local - start) / 1.0, 0, 1)).toFixed(3);
+      continue;
+    }
     const draw = easeOut(clamp((local - start) / 1.6, 0, 1));
     for (const shape of shapes) {
       shape.style.strokeDasharray = "1 1";
@@ -380,8 +490,13 @@ function poseLayer(layer: Layer, local: number, width: number, height: number) {
     el.style.transform = `translateY(${bob.toFixed(1)}px) rotate(${tilt.toFixed(2)}deg) scale(${(0.94 + 0.06 * draw).toFixed(3)})`;
   }
   // Arrivals first: an element is hidden and lowered until its moment, then settles into place.
+  // The scene's first block(s) begin arriving the moment the transition into it starts and finish as it lands (overlapping
+  // action), instead of the new scene showing an empty background until the first word is spoken. Blocks after that keep
+  // to the narration. The shift is constant, so nothing jumps when the transition ends.
+  const firstDue = layer.reveals.reduce((m, r) => Math.min(m, r.plan.start), Infinity);
   for (const { el, plan } of layer.reveals) {
-    const prog = revealProgress(plan, local);
+    const opening = layer.enter > 0 && plan.start <= firstDue + 0.3;
+    const prog = revealProgress(plan, opening ? local + plan.start + layer.enter : local);
     if (prog >= 1) continue;
     touch(layer, el);
     anchorToElement(el);
@@ -396,18 +511,6 @@ function poseLayer(layer: Layer, local: number, width: number, height: number) {
   }
 }
 
-function transitionStyle(kind: string, q: number): { opacity: string; transform: string } {
-  const e = easeOut(q);
-  switch (kind) {
-    case "slide-left": return { opacity: "1", transform: `translateX(${(1 - e) * 100}%)` };
-    case "slide-right": return { opacity: "1", transform: `translateX(${-(1 - e) * 100}%)` };
-    case "zoom-in": return { opacity: String(e), transform: `scale(${0.88 + 0.12 * e})` };
-    case "zoom-out": return { opacity: String(e), transform: `scale(${1.12 - 0.12 * e})` };
-    case "flip": return { opacity: String(e > 0.5 ? 1 : e * 2), transform: `perspective(1600px) rotateY(${(1 - e) * 90}deg)` };
-    default: return { opacity: String(e), transform: "none" }; // fade
-  }
-}
-
 export default function RenderPage() {
   const { id = "" } = useParams();
   const [params] = useSearchParams();
@@ -415,8 +518,12 @@ export default function RenderPage() {
   const [error, setError] = useState("");
   const scrub = params.get("scrub") === "1";
   const debug = params.get("debug") === "1";
+  // ?flat=1 holds the camera still, so a slide can be judged by eye (used by the theme gallery).
+  const flat = params.get("flat") === "1";
   // Picture scenes need the icon library; ?art=0 turns it off.
   const artOn = params.get("art") !== "0";
+  // A real render (?strict=1) never falls back to icons or an empty frame: a picture scene without its picture is an error.
+  const strict = params.get("strict") === "1";
   const [duration, setDuration] = useState(0);
   const setTimeRef = useRef<(t: number) => void>(() => undefined);
 
@@ -426,7 +533,18 @@ export default function RenderPage() {
     let cancelled = false;
 
     const ready = (async (): Promise<RenderInfo> => {
-      const data = id === "fixture" ? FIXTURE : await loadData(id);
+      const data: RenderData = { ...(id === "fixture" ? (params.get("theme") ? fixtureThemed(params.get("theme")!, params.get("bg") ?? "gradient", params.get("font") ?? "theme") : FIXTURE) : await loadData(id)), photos: await loadPhotos(), userImages: await loadUserImages() };
+      // One film can be rendered in more than one shape: a render names its own (?aspect=16:9, 9:16 or 1:1), and that
+      // wins over the shape saved on the project. It also lets the built-in sample be judged in vertical and square.
+      const shape = params.get("aspect");
+      if (shape === "16:9" || shape === "9:16" || shape === "1:1") data.project = { ...data.project, canvas_aspect_ratio: shape };
+      // ?userimage=1 turns the themed sample's picture scene into a viewer's-picture scene (see render.mjs --user-image).
+      if (id === "fixture" && params.get("userimage") === "1") {
+        data.slides = data.slides.map((sl) => (sl.id === "t6" ? { ...sl, html_content: sl.html_content.replace(/ data-art="[^"]*"/, ' data-image-source="fixture-image"') } : sl));
+      }
+      // The sample film can be forced to one transition (?transition=slide-left), to judge how it looks.
+      const forced = params.get("transition");
+      if (id === "fixture" && forced) data.slides = data.slides.map((sl) => ({ ...sl, transition: forced as typeof sl.transition, transition_duration: 0.6 }));
       const { width, height } = canvasSize(data.project);
       const { timings, duration: total } = buildSlideTimings(data.slides);
       if (timings.length === 0) throw new Error("This project has no slides to render.");
@@ -434,6 +552,9 @@ export default function RenderPage() {
       host.style.cssText = `position:relative;width:${width}px;height:${height}px;overflow:hidden;background:#000;`;
       host.replaceChildren();
       const layers = timings.map((t, i) => buildLayer(host, t, i, width, height));
+      layers.forEach((l, i) => {
+        l.enter = i > 0 && !isCut(l.timing.slide.transition) ? transitionSeconds(l.timing.slide.transition, l.timing.slide.transition_duration) : 0;
+      });
 
       // Every slide must be fully loaded (and Tailwind applied) before layout is measured.
       await Promise.all(layers.map((l) => l.loaded));
@@ -445,24 +566,74 @@ export default function RenderPage() {
       } catch {
         /* no art library available: scenes simply render without clip art */
       }
-      layers.forEach((l) => planLayer(l, data, width, height, art));
+      layers.forEach((l) => planLayer(l, data, width, height, art, strict));
+      // A generated picture must be decoded before any frame is drawn, or early frames would show it half-loaded.
+      await Promise.all(layers.map((l) => l.photoImg?.decode?.().catch(() => undefined)));
+
+      // Motion blur along the direction of travel. CSS has no directional blur, so two SVG blurs (one for the scene
+      // leaving, one for the scene arriving) have their strength set on every frame.
+      const svgNS = "http://www.w3.org/2000/svg";
+      const defs = document.createElementNS(svgNS, "svg");
+      defs.setAttribute("width", "0");
+      defs.setAttribute("height", "0");
+      defs.style.cssText = "position:absolute;width:0;height:0;pointer-events:none;";
+      const makeBlur = (id: string) => {
+        const f = document.createElementNS(svgNS, "filter");
+        f.setAttribute("id", id);
+        for (const [k, v] of [["x", "-20%"], ["y", "-20%"], ["width", "140%"], ["height", "140%"], ["color-interpolation-filters", "sRGB"]]) f.setAttribute(k, v);
+        const g = document.createElementNS(svgNS, "feGaussianBlur");
+        g.setAttribute("stdDeviation", "0 0");
+        f.appendChild(g);
+        defs.appendChild(f);
+        return g;
+      };
+      const blurOut = makeBlur("__tr_out");
+      const blurIn = makeBlur("__tr_in");
+      host.appendChild(defs);
+      // The white flash laid over a transition (zero opacity, and so invisible, the rest of the time).
+      const flashEl = document.createElement("div");
+      flashEl.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;background:#fff;opacity:0;pointer-events:none;z-index:50;`;
+      host.appendChild(flashEl);
+
+      const place = (layer: Layer, p: Pose, node: SVGFEGaussianBlurElement, id: string) => {
+        const st = layer.root.style;
+        st.opacity = p.opacity.toFixed(4);
+        st.zIndex = String(p.z);
+        st.transform = p.x || p.y || p.scale !== 1 ? `translate(${p.x.toFixed(2)}px, ${p.y.toFixed(2)}px) scale(${p.scale.toFixed(4)})` : "none";
+        st.clipPath = p.clip || "none";
+        if (p.blurX > 0.3 || p.blurY > 0.3) {
+          node.setAttribute("stdDeviation", `${p.blurX.toFixed(2)} ${p.blurY.toFixed(2)}`);
+          st.filter = `url(#${id})`;
+        } else st.filter = p.blur > 0.3 ? `blur(${p.blur.toFixed(2)}px)` : "none";
+      };
+      // A scene at rest is exactly at home: no transform, no filter, nothing left over from a transition.
+      const rest = (layer: Layer) => {
+        const st = layer.root.style;
+        st.opacity = "1";
+        st.zIndex = "1";
+        st.transform = "none";
+        st.filter = "none";
+        st.clipPath = "none";
+      };
 
       const setTime = (t: number) => {
         const state = slideStateAt(timings, t);
+        const arriving = state.incoming;
+        // Both scenes move during a transition, so the pair is worked out together.
+        const frames = arriving ? transitionFrames(layers[arriving.index]?.timing.slide.transition, arriving.progress, width, height, arriving.index) : null;
+        flashEl.style.opacity = (frames?.flash ?? 0).toFixed(3);
         layers.forEach((layer, i) => {
           const isCurrent = i === state.index;
-          const isIncoming = state.incoming?.index === i;
+          const isIncoming = arriving?.index === i;
           layer.root.style.visibility = isCurrent || isIncoming ? "visible" : "hidden";
-          layer.root.style.zIndex = isIncoming ? "2" : "1";
           if (isCurrent) {
-            layer.root.style.opacity = "1";
-            layer.root.style.transform = "none";
-            poseLayer(layer, state.local, width, height);
-          } else if (isIncoming && state.incoming) {
-            const st = transitionStyle(layer.timing.slide.transition, state.incoming.progress);
-            layer.root.style.opacity = st.opacity;
-            layer.root.style.transform = st.transform;
-            poseLayer(layer, 0, width, height);
+            if (frames) place(layer, frames.out, blurOut, "__tr_out");
+            else rest(layer);
+            poseLayer(layer, state.local, width, height, flat);
+          } else if (isIncoming && frames) {
+            place(layer, frames.in, blurIn, "__tr_in");
+            // The arriving scene's own clock runs up to 0 as the transition completes, so its opening content is mid-arrival.
+            poseLayer(layer, -(1 - (arriving?.progress ?? 1)) * layer.enter, width, height, flat);
           }
         });
       };
@@ -495,7 +666,8 @@ export default function RenderPage() {
         width,
         height,
         duration: total,
-        slides: timings.map((t) => ({ id: t.slide.id, start: t.start, end: t.end })),
+        // `enter` is how long the transition into this scene lasts (0 for the first scene or a hard cut): the renderer lays a sound under it.
+        slides: timings.map((t, i) => ({ id: t.slide.id, start: t.start, end: t.end, transition: layers[i].enter > 0 ? t.slide.transition : "none", enter: layers[i].enter })),
         decisions: layers.flatMap((l) => l.plan.decisions.map((d) => ({ ...d, scene: l.timing.slide.name || l.timing.slide.id })))
       };
     })();
@@ -506,7 +678,7 @@ export default function RenderPage() {
       cancelled = true;
       delete window.__render;
     };
-  }, [id, debug, artOn]);
+  }, [id, debug, artOn, flat, strict]);
 
   return (
     <div style={{ background: "#000", minHeight: "100vh" }}>

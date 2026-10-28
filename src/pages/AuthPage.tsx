@@ -32,7 +32,7 @@ export default function AuthPage() {
         await login(email, pwd);
       } else if (mode === "register") {
         await register(email, pwd, fn, ln);
-        setNotice("Account created. Check your email for a verification link, then sign in.");
+        setNotice("Request received. Check your email for a verification link, then sign in. Your account will be reviewed, and you'll be let in as soon as it's approved.");
         setMode("login");
       } else {
         await forgotPassword(email);
@@ -49,7 +49,7 @@ export default function AuthPage() {
   return (
     <div className="grid min-h-screen md:grid-cols-2">
       <div className="hidden flex-col justify-between overflow-hidden bg-[#191816] p-16 text-[#e8e4dc] md:flex">
-        <span className="font-display text-lg tracking-wide">Cinematic Studio</span>
+        <span className="font-display text-lg tracking-wide">Cinecule</span>
         <div>
           <p className="mb-6 text-[11px] uppercase tracking-widest text-[#c99b4e]">Reel one · sheet one</p>
           <h2 className="mb-4 max-w-[20ch] font-display text-5xl font-normal leading-[1.05] text-[#f2ede4]">
@@ -68,7 +68,7 @@ export default function AuthPage() {
           <Link to="/" className="mb-6 flex items-center gap-2.5 transition-opacity hover:opacity-80">
             <Clapperboard className="h-7 w-7 text-primary" />
             <div>
-              <h1 className="font-display text-xl font-semibold">Cinematic Studio</h1>
+              <h1 className="font-display text-xl font-semibold">Cinecule</h1>
               <p className="text-[11px] uppercase tracking-widest text-muted">article &rarr; 4K film, automatically</p>
             </div>
           </Link>
@@ -77,6 +77,12 @@ export default function AuthPage() {
           {error && <Alert severity="error">{error}</Alert>}
           {notice && <Alert severity="success">{notice}</Alert>}
 
+          {mode === "register" && (
+            <p className="rounded-[4px] border border-border bg-surface-raised px-3 py-2.5 text-sm leading-relaxed text-muted">
+              Cinecule is invite-only while it's in early access. Create your account to join the waiting list. You can sign
+              in right away, and you'll be let in once it's approved.
+            </p>
+          )}
           {mode === "register" && (
             <div className="flex gap-3">
               <Field label="First name">
@@ -102,7 +108,7 @@ export default function AuthPage() {
           )}
 
           <Button size="lg" disabled={busy} onClick={submit}>
-            {mode === "login" ? "Sign in" : mode === "register" ? "Create account" : "Send reset email"}
+            {mode === "login" ? "Sign in" : mode === "register" ? "Request access" : "Send reset email"}
           </Button>
 
           <div className="flex justify-between text-sm">
@@ -113,7 +119,7 @@ export default function AuthPage() {
             ) : (
               <>
                 <button className="text-primary-text hover:underline" onClick={() => setMode("register")}>
-                  Create account
+                  Request access
                 </button>
                 <button className="text-primary-text hover:underline" onClick={() => setMode("forgot")}>
                   Forgot password?

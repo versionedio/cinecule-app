@@ -35,7 +35,9 @@ export async function claimNext(api) {
   if (queued.length === 0) return null;
   queued.sort((a, b) => (createdMs(a) || 0) - (createdMs(b) || 0));
   const asset = queued[0];
-  await api.put(`/update/exportasset/${asset.id}`, { status: "processing", stage: "Starting", progress_pct: 1, eta_sec: 150 });
+  // No time estimate yet: the worker does not know the film's length at this point, and a made-up number
+  // would be wrong. The render step reports a real one as soon as it has loaded the film.
+  await api.put(`/update/exportasset/${asset.id}`, { status: "processing", stage: "Starting", progress_pct: 1 });
   console.log(`Claimed export asset ${asset.id} for project ${asset.project_id} (${asset.resolution} @ ${asset.frame_rate} fps).`);
   return asset;
 }

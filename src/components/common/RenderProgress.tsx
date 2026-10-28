@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { entityService } from "@/services/entityService";
+import { RotateCw } from "lucide-react";
+import { latestRenders, retryRender, shapeName } from "@/services/renderService";
+import { Button } from "@/components/ui/button";
 import { ENTITY_NAMES, ExportAsset, GeneratedHtml } from "@/config/entities";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
@@ -7,8 +10,10 @@ import { cn } from "@/lib/utils";
 const POLL_MS = 3000;
 const STALL_AFTER_MS = 120_000;
 // A queued render normally starts within a minute or two (the platform starts the render workflow
-// as soon as it is queued). Past this, dispatch probably missed and the hourly safety check will pick it up.
-const SLOW_START_MS = 4 * 60_000;
+// as soon as it is queued). If it still hasn't STARTED after this long, the request probably never reached
+// a worker, so the person gets a Retry button. (This is about starting, not finishing: a render that is
+// under way can take as long as it needs.)
+const SLOW_START_MS = 5 * 60_000;
 
 // Record ids are <3-letter prefix><base36 ms timestamp><1 char>, so an id tells us when the asset was queued.
 function queuedAtMs(id: string | undefined): number {
@@ -25,11 +30,34 @@ export function formatEta(seconds: number): string {
   return `about ${m} min${s >= 5 ? ` ${s} s` : ""}`;
 }
 
-// Rendering takes roughly as long as the video plays, plus startup and encoding.
-const estimateRenderSeconds = (videoSeconds: number) => Math.round(videoSeconds * 1.1 + 40);
+// Measured on real GitHub runs (keep in step with scripts/render/render.mjs): a 1080p, 30 fps frame takes
+// about 0.07 s to draw and capture, so a film takes roughly twice its own length to render, plus the
+// worker starting up (checkout, install, browser, build), pictures when it has picture scenes, and finishing.
+const SETUP_SEC = 150;
+const PER_FRAME_SEC = 0.07;
+const PICTURES_SEC = 60;
+const FINISH_SEC = 60;
+
+function estimateRenderSeconds(videoSeconds: number, opts: { fps?: number; resolution?: string; hasPictures?: boolean } = {}): number {
+  const [w, h] = String(opts.resolution ?? "1920x1080").split("x").map(Number);
+  const scale = w > 0 && h > 0 ? (w * h) / (1920 * 1080) : 1;
+  const frames = videoSeconds * (opts.fps || 30);
+  return Math.round(SETUP_SEC + (opts.hasPictures ? PICTURES_SEC : 0) + frames * PER_FRAME_SEC * scale + FINISH_SEC);
+}
+
+/** "about 6 to 9 minutes": an honest range around the estimate, since runner speed varies. */
+function formatRange(seconds: number): string {
+  const lo = Math.max(1, Math.round((seconds * 0.85) / 60));
+  const hi = Math.max(lo + 1, Math.round((seconds * 1.3) / 60));
+  return `about ${lo} to ${hi} minutes`;
+}
 
 interface Snapshot {
+  /** The render being shown: the one under way, else the next in line, else the newest. */
   asset: ExportAsset | null;
+  /** How many videos this render makes (one per chosen shape), and which of them `asset` is, counting from 1. */
+  total: number;
+  position: number;
   receivedAt: number;
   // When progress last moved, to tell a slow render from a stuck one.
   changedAt: number;
@@ -45,9 +73,14 @@ export default function RenderProgress({
   /** Called once when the render reaches "ready" or "failed", so the page can refresh the project. */
   onFinished?: () => void;
 }) {
-  const [snap, setSnap] = useState<Snapshot>(() => ({ asset: null, receivedAt: Date.now(), changedAt: Date.now() }));
+  const [snap, setSnap] = useState<Snapshot>(() => ({ asset: null, total: 0, position: 0, receivedAt: Date.now(), changedAt: Date.now() }));
   const [now, setNow] = useState(() => Date.now());
   const [videoSeconds, setVideoSeconds] = useState(0);
+  const [hasPictures, setHasPictures] = useState(false);
+  // Retrying a render that never started: when it was last asked, so the 5 minutes begin again after each try.
+  const [lastTry, setLastTry] = useState<number | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryNote, setRetryNote] = useState("");
   const finished = useRef(false);
   const onFinishedRef = useRef(onFinished);
   useEffect(() => {
@@ -66,13 +99,26 @@ export default function RenderProgress({
           controller.signal
         );
         if (cancelled) return;
-        // Record ids grow with time, so the highest id is the latest render.
-        const latest = (res.data ?? []).slice().sort((a, b) => (a.id < b.id ? 1 : -1))[0] ?? null;
+        // A film rendered in more than one shape has one render per shape, taken one after the other.
+        const batch = latestRenders(res.data ?? []);
+        const running = batch.find((a) => a.status === "processing");
+        const waiting = batch.filter((a) => a.status === "created");
+        const finishedOnes = batch.filter((a) => a.status === "ready" || a.status === "failed");
+        // Between two videos the next one is queued for a moment. That is progress, not a stuck queue, so it is
+        // shown as a render that is starting rather than as one waiting for a worker.
+        const latest: ExportAsset | null =
+          running ?? (waiting.length && finishedOnes.length ? { ...waiting[0], status: "processing", stage: "Getting the next video ready", progress_pct: 0, eta_sec: undefined } : waiting[0] ?? batch[batch.length - 1] ?? null);
+        const total = batch.length;
+        const position = latest ? batch.findIndex((a) => a.id === latest.id) + 1 : 0;
         setSnap((prev) => {
           const moved = !prev.asset || prev.asset.id !== latest?.id || prev.asset.progress_pct !== latest?.progress_pct || prev.asset.stage !== latest?.stage || prev.asset.status !== latest?.status;
-          return { asset: latest, receivedAt: Date.now(), changedAt: moved ? Date.now() : prev.changedAt };
+          // The countdown runs from when the estimate last CHANGED. Resetting it on every poll would snap it
+          // back up every few seconds while the estimate is unchanged.
+          const sameEstimate = prev.asset?.id === latest?.id && prev.asset?.eta_sec === latest?.eta_sec && prev.asset?.stage === latest?.stage;
+          return { asset: latest, total, position, receivedAt: sameEstimate ? prev.receivedAt : Date.now(), changedAt: moved ? Date.now() : prev.changedAt };
         });
-        if (latest && (latest.status === "ready" || latest.status === "failed") && !finished.current) {
+        // Done only when every video in the batch has finished.
+        if (total > 0 && finishedOnes.length === total && !finished.current) {
           finished.current = true;
           onFinishedRef.current?.();
         }
@@ -100,38 +146,80 @@ export default function RenderProgress({
     if (compact) return;
     entityService
       .listAll<GeneratedHtml>(ENTITY_NAMES.generatedHtml, { project_id: projectId })
-      .then((slides) => setVideoSeconds(slides.reduce((t, s) => t + (Number(s.duration) || 0), 0)))
+      .then((slides) => {
+        setVideoSeconds(slides.reduce((t, s) => t + (Number(s.duration) || 0), 0));
+        setHasPictures(slides.some((s) => /data-(?:art|image-source)\s*=\s*["']/.test(String(s.html_content ?? ""))));
+      })
       .catch(() => undefined);
   }, [projectId, compact]);
 
   const asset = snap.asset;
   const queued = !asset || asset.status === "created";
   const pct = Math.max(0, Math.min(100, Number(asset?.progress_pct) || 0));
-  const etaLeft = asset?.eta_sec != null ? Math.max(0, Number(asset.eta_sec) - (now - snap.receivedAt) / 1000) : null;
+  // "Starting" is the moment the worker claims the render, before it has even looked at the film. Any time written then
+  // is a guess (older workers wrote a flat 150 s), so no countdown is shown until the render reports a real one.
+  const etaLeft =
+    asset?.eta_sec != null && asset.stage !== "Starting" ? Math.max(0, Number(asset.eta_sec) - (now - snap.receivedAt) / 1000) : null;
   const stalled = !queued && asset?.status === "processing" && now - snap.changedAt > STALL_AFTER_MS;
 
   if (queued) {
-    const waitedMs = asset ? now - queuedAtMs(asset.id) : 0;
+    // After a retry the wait starts over, so the button only comes back if that try didn't get it started either.
+    const waitedMs = asset ? now - Math.max(queuedAtMs(asset.id), lastTry ?? 0) : 0;
     const slowStart = Number.isFinite(waitedMs) && waitedMs > SLOW_START_MS;
-    const estimate = videoSeconds > 0 ? ` Once it starts, a ${Math.round(videoSeconds)}-second video takes ${formatEta(estimateRenderSeconds(videoSeconds))}.` : "";
+    const retry = async () => {
+      setRetrying(true);
+      setRetryNote("");
+      try {
+        const sent = await retryRender(projectId);
+        setLastTry(Date.now());
+        setRetryNote(sent ? "Asked the render worker to start again. Give it a minute or two." : "Nothing to retry: it may have just started.");
+      } catch {
+        setRetryNote("Couldn't send that. Please try again in a minute.");
+      } finally {
+        setRetrying(false);
+      }
+    };
+    const estimate =
+      videoSeconds > 0
+        ? ` In total, a ${Math.round(videoSeconds)}-second film usually takes ${formatRange(estimateRenderSeconds(videoSeconds, { fps: Number(asset?.frame_rate) || 30, resolution: asset?.resolution, hasPictures }))}.`
+        : "";
     return compact ? (
       <p className="flex items-center gap-2 text-xs text-muted">
         <Spinner /> {slowStart ? "Still waiting for a render worker" : "Starting the render"}
+        {slowStart && (
+          <button type="button" onClick={retry} disabled={retrying} className="text-primary-text underline underline-offset-2 disabled:opacity-50">
+            {retrying ? "Retrying…" : "Retry"}
+          </button>
+        )}
+        {retryNote && !slowStart && <span role="status">{retryNote}</span>}
       </p>
     ) : (
       <div role="status" className="rounded-[4px] border border-border bg-surface-raised p-4">
         <p className="flex items-center gap-2 font-medium"><Spinner /> {slowStart ? "Still waiting for a render worker" : "Starting the render"}</p>
         <p className="mt-1 text-sm text-muted">
           {slowStart
-            ? "This is taking longer than usual to start. A backup check runs about once an hour and will start it if the worker doesn't."
+            ? "This is taking longer than usual to start. It may not have been picked up. Press Retry to ask again."
             : "Your video is queued and should start within a minute or two."}
           {estimate}
         </p>
+        {(slowStart || retryNote) && (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            {slowStart && (
+              <Button size="sm" variant="outline" onClick={retry} disabled={retrying}>
+                {retrying ? <Spinner /> : <RotateCw className="h-3.5 w-3.5" />}
+                {retrying ? "Retrying…" : "Retry"}
+              </Button>
+            )}
+            {retryNote && <span className="text-sm text-muted" role="status">{retryNote}</span>}
+          </div>
+        )}
       </div>
     );
   }
 
-  const stage = asset?.stage || "Rendering";
+  // With several videos, say which one this is: "Rendering" -> "Rendering · Vertical 9:16 (2 of 2)".
+  const which = snap.total > 1 ? ` · ${shapeName(asset?.aspect_ratio) || "Video"} (${snap.position} of ${snap.total})` : "";
+  const stage = `${asset?.stage || "Rendering"}${which}`;
   const remaining = etaLeft == null ? "" : etaLeft < 2 ? "finishing up" : `${formatEta(etaLeft)} left`;
 
   const bar = (

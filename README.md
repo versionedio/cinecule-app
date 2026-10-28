@@ -1,4 +1,4 @@
-# Cinematic Studio — nostackai frontend
+# Cinecule — nostackai frontend
 
 The control room for the article-to-4K-video pipeline. Built with Vite + React + TypeScript + MUI, following nostackai's frontend standards (config-driven pages, a dedicated services layer, token kept in memory).
 

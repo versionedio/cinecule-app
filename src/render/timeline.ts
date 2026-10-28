@@ -1,5 +1,6 @@
 import type { CanvasAspectRatio, EffectType, GeneratedHtml, Interaction, Project, ShotEasing } from "@/config/entities";
 import type { WordTiming } from "./director";
+import { isCut, transitionSeconds } from "./transitions";
 
 
 /**
@@ -16,6 +17,22 @@ export interface RenderData {
   interactions: Interaction[];
   /** Word-by-word timing of each scene's narration. */
   audio: { slide_id: string; words: WordTiming[] }[];
+  /** Generated pictures by slide id (a path the render server serves); a picture scene uses its picture instead of icons. */
+  photos?: Record<string, string>;
+  /** The viewer's own pictures by slide id, with how the render script decided each is shown. */
+  userImages?: Record<string, UserImage>;
+}
+
+/** How a viewer's own picture fills a scene: all of it, or cropped to its main subject. */
+export interface UserImage {
+  /** A path the render server serves. */
+  url: string;
+  treatment: "whole" | "focus";
+  /** The picture's width over its height. */
+  aspect: number;
+  /** For "focus": the part to show, as fractions of the picture. It has the frame's own shape. */
+  crop?: { x: number; y: number; w: number; h: number };
+  reason?: string;
 }
 
 export interface SlideTiming {
@@ -31,8 +48,6 @@ export interface Camera {
 }
 
 export const REST_CAMERA: Camera = { x: 50, y: 50, zoom: 1 };
-// The slide's own padding is where the next slide transitions in, so a transition never outlasts it.
-export const MAX_TRANSITION_SEC = 0.8;
 
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 export const lerp = (a: number, b: number, p: number) => a + (b - a) * p;
@@ -74,8 +89,9 @@ export function slideStateAt(timings: SlideTiming[], t: number) {
   const current = timings[index];
   const next = timings[index + 1];
   let incoming: null | { index: number; progress: number } = null;
-  if (next && next.slide.transition && next.slide.transition !== "none") {
-    const dur = clamp(Number(next.slide.transition_duration) || 0.6, 0.1, MAX_TRANSITION_SEC);
+  if (next && !isCut(next.slide.transition)) {
+    // The kind decides how long it may take (a whip pan is far shorter than a dissolve), whatever the scene asked for.
+    const dur = transitionSeconds(next.slide.transition, next.slide.transition_duration);
     if (t >= current.end - dur) incoming = { index: index + 1, progress: clamp((t - (current.end - dur)) / dur, 0, 1) };
   }
   return { index, local: clamp(t - current.start, 0, current.end - current.start), incoming };
