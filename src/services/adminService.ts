@@ -1,4 +1,4 @@
-import { ApiError } from "./apiClient";
+import { ApiError, api } from "./apiClient";
 import { entityService } from "./entityService";
 import type { AccessRequest } from "./accessRequestService";
 
@@ -107,4 +107,25 @@ export async function approve(userId: string, memberPolicyId: string): Promise<v
 /** Takes a member back to waiting (removes whichever member policy they hold). They keep their account and everything they made. */
 export async function revoke(person: Person): Promise<void> {
   for (const id of person.memberAssignmentIds) await entityService.remove(ASSIGNMENT, id);
+}
+
+interface ResumeReply {
+  combinedText?: string;
+  files?: { file?: string; text?: string; error?: string }[];
+}
+
+/**
+ * Reads a waiting person's resume for an admin. The PDF itself is private, so the backend (admins only) extracts its
+ * text and returns that; the page shows it.
+ */
+export async function loadResumeText(requestId: string): Promise<string> {
+  const res = await api.post<{ result?: ResumeReply & { resume?: ResumeReply } }>(`/logicblocks/get_resume?id=${encodeURIComponent(requestId)}`, {});
+  const out: ResumeReply | undefined = res.result?.resume ?? res.result;
+  const failed = out?.files?.find((f) => f.error)?.error;
+  // The reader puts a "--- <file path> ---" header above each file's text; it is an internal storage path, so it is dropped.
+  const joined = out?.files?.map((f) => f.text ?? "").join("\n\n") || out?.combinedText || "";
+  const text = joined.replace(/^\s*---[^\n]*---\s*/gm, "").trim();
+  if (failed && !text) throw new Error(`The resume could not be read: ${failed}`);
+  if (!text) throw new Error("No readable text was found in this resume (it may be a scanned image).");
+  return text;
 }
