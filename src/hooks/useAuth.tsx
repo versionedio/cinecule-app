@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import * as authService from "@/services/authService";
 import { Access, checkAccess } from "@/services/accessService";
+import { loadMyAccessRequest } from "@/services/accessRequestService";
 import { checkAdmin } from "@/services/adminService";
 import type { Profile } from "@/services/authService";
 import { AUTH_EXPIRED_EVENT, getStoredToken, refreshToken, setToken } from "@/services/apiClient";
@@ -79,6 +80,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [checkingAdmin, email]);
   const isAdmin: boolean | null = access === "pending" ? false : checkingAdmin && adminResult && adminResult.email === email ? adminResult.yes : null;
+
+  // Everyone's name and email is saved once, not only people who waited: it is the only way the Access page can show
+  // who an approved member or admin is (the platform's user list is not readable from the app). Best effort.
+  const fullName = [profile?.fn, profile?.ln].filter(Boolean).join(" ");
+  useEffect(() => {
+    if (access !== "approved" || !email) return;
+    loadMyAccessRequest({ email, name: fullName }).catch(() => undefined);
+  }, [access, email, fullName]);
 
   // A request found the session unrecoverable (refresh failed after a 401).
   useEffect(() => {
