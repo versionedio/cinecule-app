@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, FileText, RefreshCw, ShieldCheck, UserCheck, UserMinus } from "lucide-react";
-import { Person, PeopleSnapshot, approve, loadPeople, revoke } from "@/services/adminService";
+import { CheckCircle2, FileText, FileSearch, RefreshCw, ShieldCheck, UserCheck, UserMinus } from "lucide-react";
+import { Person, PeopleSnapshot, approve, loadPeople, loadResumeText, revoke } from "@/services/adminService";
+import { ResumeText } from "@/components/access/ResumeText";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,8 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [resumeBusy, setResumeBusy] = useState<string | null>(null);
+  const [resumes, setResumes] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -62,6 +65,26 @@ export default function AdminUsersPage() {
       setError(e instanceof Error ? e.message : "That didn't go through. Nothing was changed.");
     } finally {
       setBusyId(null);
+    }
+  };
+
+  // The resume file is private, so the backend (admins only) reads it and sends back its text, shown under the request.
+  const toggleResume = async (person: Person) => {
+    const id = person.request?.id;
+    if (!id) return;
+    if (resumes[person.userId] !== undefined) {
+      setResumes((prev) => Object.fromEntries(Object.entries(prev).filter(([k]) => k !== person.userId)));
+      return;
+    }
+    setResumeBusy(person.userId);
+    setError("");
+    try {
+      const text = await loadResumeText(id);
+      setResumes((prev) => ({ ...prev, [person.userId]: text }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "The resume could not be read.");
+    } finally {
+      setResumeBusy(null);
     }
   };
 
@@ -114,10 +137,21 @@ export default function AdminUsersPage() {
                       </div>
                       {p.request?.message && <p className="mt-3 whitespace-pre-wrap break-words rounded-lg bg-surface-raised px-3 py-2 text-sm">{p.request.message}</p>}
                       {p.request?.resume_name && (
-                        <p className="mt-3 inline-flex items-center gap-1.5 text-sm text-muted">
-                          <FileText className="h-4 w-4 text-primary-text" />
-                          Resume: <span className="max-w-[260px] truncate text-foreground">{p.request.resume_name}</span>
-                        </p>
+                        <div className="mt-3">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <p className="inline-flex items-center gap-1.5 text-sm text-muted">
+                              <FileText className="h-4 w-4 text-primary-text" />
+                              Resume: <span className="max-w-[260px] truncate text-foreground">{p.request.resume_name}</span>
+                            </p>
+                            <Button variant="outline" size="sm" onClick={() => void toggleResume(p)} disabled={busyId !== null || resumeBusy !== null}>
+                              {resumeBusy === p.userId ? <Spinner /> : <FileSearch className="h-3.5 w-3.5" />}
+                              {resumes[p.userId] !== undefined ? "Hide resume" : "Read resume"}
+                            </Button>
+                          </div>
+                          {resumes[p.userId] !== undefined && (
+                            <ResumeText text={resumes[p.userId]} name={p.request.resume_name} />
+                          )}
+                        </div>
                       )}
                     </Card>
                   </li>
