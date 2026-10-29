@@ -29,11 +29,36 @@ export async function failStaleRenders(api) {
   }
 }
 
+// One press of "Render" queues one video per shape. If the same shape of the same film is queued twice within this
+// window, the second is a duplicate (the render was triggered twice) and would only make an identical video.
+const DUPLICATE_WINDOW_MS = 60_000;
+
+/** The queued renders to keep (oldest first) and the duplicates among them. */
+export function splitDuplicates(queued) {
+  const sorted = queued.slice().sort((a, b) => (createdMs(a) || 0) - (createdMs(b) || 0));
+  const keep = [];
+  const duplicates = [];
+  for (const a of sorted) {
+    const twin = keep.find((k) => k.project_id === a.project_id && (k.aspect_ratio || "") === (a.aspect_ratio || "") && Math.abs((createdMs(a) || 0) - (createdMs(k) || 0)) < DUPLICATE_WINDOW_MS);
+    if (twin) duplicates.push(a);
+    else keep.push(a);
+  }
+  return { keep, duplicates };
+}
+
 /** Oldest queued render, claimed as "processing"; null when the queue is empty. */
 export async function claimNext(api) {
-  const queued = await api.list("exportasset", { status: "created", asset_type: "video" });
+  const all = await api.list("exportasset", { status: "created", asset_type: "video" });
+  const { keep: queued, duplicates } = splitDuplicates(all);
+  for (const d of duplicates) {
+    try {
+      await api.del(`/delete/exportasset/${d.id}`);
+      console.log(`Dropped duplicate render ${d.id} (same film and shape as another queued render).`);
+    } catch (e) {
+      console.warn(`Could not drop duplicate render ${d.id}: ${e.message}`);
+    }
+  }
   if (queued.length === 0) return null;
-  queued.sort((a, b) => (createdMs(a) || 0) - (createdMs(b) || 0));
   const asset = queued[0];
   // No time estimate yet: the worker does not know the film's length at this point, and a made-up number
   // would be wrong. The render step reports a real one as soon as it has loaded the film.

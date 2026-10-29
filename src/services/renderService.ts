@@ -30,7 +30,16 @@ export function latestRenders(assets: ExportAsset[]): ExportAsset[] {
   if (!newest) return [];
   const at = createdMs(newest.id);
   if (Number.isNaN(at)) return [newest];
-  return byId.filter((a) => at - createdMs(a.id) < SAME_BATCH_MS);
+  const batch = byId.filter((a) => at - createdMs(a.id) < SAME_BATCH_MS);
+  // One video per shape. If the same shape was queued twice in a batch, only one is kept: the finished one if there
+  // is one, otherwise the later one.
+  const perShape = new Map<string, ExportAsset>();
+  for (const a of batch) {
+    const key = a.aspect_ratio ?? "";
+    const kept = perShape.get(key);
+    if (!kept || a.status === "ready" || kept.status !== "ready") perShape.set(key, a);
+  }
+  return batch.filter((a) => perShape.get(a.aspect_ratio ?? "") === a);
 }
 
 /** "16:9" -> "Wide 16:9" etc., for naming a video. Empty for a render in the film's own shape. */
