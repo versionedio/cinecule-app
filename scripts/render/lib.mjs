@@ -48,6 +48,7 @@ export function client(token) {
     get: (p) => request("GET", p),
     post: (p, b) => request("POST", p, b ?? {}),
     put: (p, b) => request("PUT", p, b),
+    del: (p) => request("DELETE", p),
     list: async (entity, params = {}) => {
       const qs = new URLSearchParams({ pagesize: "100", ...params }).toString();
       return (await request("GET", `/list/${entity}?${qs}`)).data ?? [];
