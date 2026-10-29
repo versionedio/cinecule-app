@@ -207,6 +207,7 @@ export const REVEAL = {
   DURATION: 0.55, // how long a block takes to settle into place
   LEAD: 0.35, // it starts arriving just before the narrator reaches it
   EARLIEST: 0.15,
+  GAP: 0.12, // the least time between one block arriving and the next
   AFTER_PREVIOUS: 0.45, // a block the narration never mentions arrives this long after the one before it
   MATCH_MIN: 0.34 // a looser bar than emphasis: a slightly early or late entrance is harmless
 };
@@ -234,6 +235,14 @@ export function planReveals(blocks: RevealBlock[], words: WordTiming[], duration
     }
     plans.push({ selector: b.selector, start, duration: REVEAL.DURATION, synced });
     prevStart = start;
+  }
+  // Blocks arrive in reading order. If the narrator reaches a lower block before the one above it, the one above
+  // comes in earlier (a little ahead of its words) rather than the lower one appearing first.
+  for (let i = plans.length - 2; i >= 0; i--) {
+    plans[i].start = clamp(Math.min(plans[i].start, plans[i + 1].start - REVEAL.GAP), REVEAL.EARLIEST, latest);
+  }
+  for (let i = 1; i < plans.length; i++) {
+    plans[i].start = Math.min(latest, Math.max(plans[i].start, plans[i - 1].start + REVEAL.GAP));
   }
   return plans;
 }
