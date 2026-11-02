@@ -29,6 +29,10 @@ const ALLOWED_VOICES = new Set([
   "FGY2WhTYpPnrIDTdsKH5" // Laura
 ]);
 
+// The background music the app offers (see src/config/music.ts and public/music). A film may only be pointed at one of
+// these tracks, or at nothing (no music).
+const ALLOWED_MUSIC = new Set(["", "upbeat", "calm", "cinematic", "corporate", "playful", "chill"]);
+
 // The shapes a film can be rendered in. A film may ask for any of them, each at most once, or for none (its own shape).
 const RENDER_SHAPES = ["16:9", "9:16", "1:1"];
 const validShapes = (value) => {
@@ -49,7 +53,7 @@ const RULES = {
       "article_content", "video_type", "status", "canvas_aspect_ratio", "custom_canvas_width", "custom_canvas_height",
       "director_camera_intensity", "director_auto_generate_effects", "director_zoom_hold_after_effect_sec",
       "director_camera_move_duration_sec", "cursor_speed", "render_resolution", "render_fps", "error_message", "voice_id",
-      "render_aspect_ratios"
+      "render_aspect_ratios", "music_id"
     ])
   },
   generatedhtml: { create: true, update: true, delete: true, fields: COMMON.concat(["html_content", "sort_order", "duration", "transition", "transition_duration", "narration_text"]) },
@@ -124,6 +128,7 @@ module.exports.handler = async function (request, ctx) {
     }
     if (what === "update" && Object.keys(out).length === 0) refuse("Nothing to change.");
     if (rule.root && "voice_id" in out && !ALLOWED_VOICES.has(String(out.voice_id == null ? "" : out.voice_id))) refuse("That voice isn't available.");
+    if (rule.root && "music_id" in out && !ALLOWED_MUSIC.has(String(out.music_id == null ? "" : out.music_id))) refuse("That music isn't available.");
     if (rule.root && "render_aspect_ratios" in out && !validShapes(out.render_aspect_ratios)) refuse("Those video shapes aren't available.");
     return out;
   };

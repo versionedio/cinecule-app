@@ -133,6 +133,11 @@ await test("projects: the owner is the caller, the email comes from the session,
   assert.equal("owner_email" in out.results[0].record, false);
   assert.match((await run(sb, [{ entity: "project", op: "create", fields: { owner_email: "x@y.z" } }])).error, /can't be set here/);
   assert.match((await run(sb, [{ entity: "project", op: "create", fields: { voice_id: "some-other-voice" } }])).error, /voice/);
+  // Background music: one of the app's tracks or nothing; anything else is refused.
+  assert.equal((await run(sb, [{ entity: "project", op: "create", fields: { name: "Film", music_id: "calm" } }])).ok, true);
+  assert.equal((await run(sb, [{ entity: "project", op: "create", fields: { name: "Film", music_id: "" } }])).ok, true);
+  assert.match((await run(sb, [{ entity: "project", op: "create", fields: { name: "Film", music_id: "../../etc/passwd" } }])).error, /music/);
+  assert.match((await run(sb, [{ entity: "project", op: "create", fields: { name: "Film", music_id: "some-other-track" } }])).error, /music/);
   assert.equal((await run(sb, [{ entity: "project", op: "create", fields: { render_aspect_ratios: "16:9,9:16" } }])).ok, true);
   for (const bad of ["4:3", "16:9,16:9", "16:9;9:16"]) assert.match((await run(sb, [{ entity: "project", op: "create", fields: { render_aspect_ratios: bad } }])).error, /shapes/, bad);
 });
