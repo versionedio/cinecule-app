@@ -42,6 +42,8 @@ export interface Project {
   canvas_aspect_ratio: CanvasAspectRatio;
   // The shapes to render, comma separated ("16:9,9:16"); one video is made per shape. Empty: one, in canvas_aspect_ratio.
   render_aspect_ratios?: string;
+  // The background music: the id of one of the app's tracks (src/config/music.ts). Empty: no music.
+  music_id?: string;
   custom_canvas_width?: number;
   custom_canvas_height?: number;
   director_camera_intensity?: CameraIntensity;

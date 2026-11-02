@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { client, login } from "./lib.mjs";
 import { generateSceneImages, prepareUserImages, treatUserImage } from "./images.mjs";
+import { musicFileFor, musicFilters } from "./mix.mjs";
 
 const DIST = path.resolve("dist");
 // There is no upload limit on the current plan, so videos are encoded for quality, not size.
@@ -33,6 +34,8 @@ const frameSeconds = (frames, resolution) => {
 // Default id of the get_voiceover_audio glyph; override with GLYPH_AUDIO_ID if it is ever recreated.
 const AUDIO_GLYPH_ID = process.env.GLYPH_AUDIO_ID || "e94f67d5-30a9-476e-b830-4849cb359083";
 const TOKEN_KEY = "cinecule.token";
+// Background music tracks live in the app's public folder (public/music/<id>.mp3), which the render job has checked out.
+const MUSIC_DIR = fileURLToPath(new URL("../../public/music/", import.meta.url));
 
 function parseArgs(argv) {
   const out = {};
@@ -120,8 +123,8 @@ function transitionSfx(info) {
   return clips;
 }
 
-/** audioClips: [{ file, start, gain? }] with `start` in seconds from the beginning of the video. */
-async function renderVideo({ url, token, resolution, fps, audioClips, outFile, maxSeconds, onProgress = () => {} }) {
+/** audioClips: [{ file, start, gain? }] with `start` in seconds from the beginning of the video. `music` is an optional track that loops under everything. */
+async function renderVideo({ url, token, resolution, fps, audioClips, music = null, outFile, maxSeconds, onProgress = () => {} }) {
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage", "--force-color-profile=srgb"] });
   try {
     // Canvas size comes from the page, so open it once at a default size to learn it.
@@ -154,13 +157,18 @@ async function renderVideo({ url, token, resolution, fps, audioClips, outFile, m
 
     const args = ["-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(fps), "-c:v", "mjpeg", "-i", "-"];
     clips.forEach((c) => args.push("-i", c.file));
+    if (music) args.push("-stream_loop", "-1", "-i", music); // loops to cover the whole film
     const filters = ["[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v]"];
     if (clips.length) {
       clips.forEach((c, i) => filters.push(`[${i + 1}:a]aresample=44100,volume=${c.gain ?? 1},adelay=${Math.round(c.start * 1000)}|${Math.round(c.start * 1000)}[a${i}]`));
-      filters.push(`${clips.map((_, i) => `[a${i}]`).join("")}amix=inputs=${clips.length}:normalize=0:duration=longest[aout]`);
+      filters.push(`${clips.map((_, i) => `[a${i}]`).join("")}amix=inputs=${clips.length}:normalize=0:duration=longest${music ? "[speech]" : "[aout]"}`);
+    }
+    if (music) {
+      console.log(`Background music: ${path.basename(music)} (ducks under the narration).`);
+      filters.push(...musicFilters({ speechLabel: clips.length ? "[speech]" : null, musicIndex: clips.length + 1, seconds: duration }).filters);
     }
     args.push("-filter_complex", filters.join(";"), "-map", "[v]");
-    if (clips.length) args.push("-map", "[aout]", "-c:a", "aac", "-b:a", `${AUDIO_KBPS}k`);
+    if (clips.length || music) args.push("-map", "[aout]", "-c:a", "aac", "-b:a", `${AUDIO_KBPS}k`);
     // Quality-based. Only when a size cap is configured is the video bitrate limited to fit it.
     const cap = MAX_UPLOAD_BYTES ? (() => { const kbps = Math.max(250, Math.floor((TARGET_BYTES * 8) / 1000 / duration - AUDIO_KBPS)); return ["-maxrate", `${kbps}k`, "-bufsize", `${kbps * 2}k`]; })() : [];
     args.push("-c:v", "libx264", "-preset", process.env.X264_PRESET || "medium", "-crf", MAX_UPLOAD_BYTES ? "20" : "18", ...cap, "-r", String(fps), "-t", String(duration), "-movflags", "+faststart", outFile);
@@ -233,6 +241,7 @@ async function runFixture(args) {
       resolution: shapedResolution(args.res || "1920x1080", typeof args.aspect === "string" ? args.aspect : undefined),
       fps: Number(args.fps) || 30,
       maxSeconds: args["max-seconds"] ? Number(args["max-seconds"]) : undefined,
+      music: typeof args.music === "string" ? musicFileFor(args.music, MUSIC_DIR) : null,
       outFile,
       // One tone per slide, starting with the slide, to prove clip placement.
       audioClips: async (info) => {
@@ -334,11 +343,16 @@ async function runAsset(assetId, { dryRun = false, out, debug = false, art = tru
 
     const served = await serveDist(genDir);
     server = served.server;
+    // The film's chosen background music (none unless it picked one of the app's tracks).
+    const project = await api.get(`/item/project/${projectId}`);
+    const musicFile = musicFileFor(project?.music_id, MUSIC_DIR);
+    if (project?.music_id && (!musicFile || !fs.existsSync(musicFile))) console.warn(`Music "${project.music_id}" is not available; rendering without music.`);
     const result = await renderVideo({
       url: `http://localhost:${served.port}/render/${projectId}${renderQuery({ debug, art, aspect, strict: true })}`,
       token,
       resolution,
       fps,
+      music: musicFile && fs.existsSync(musicFile) ? musicFile : null,
       outFile,
       onProgress: report,
       audioClips: (info) => info.slides.filter((s) => clipFiles.has(s.id)).map((s) => ({ file: clipFiles.get(s.id), start: s.start }))

@@ -8,6 +8,7 @@ import RenderProgress from "@/components/common/RenderProgress";
 import { AssistantBubble, Typed, TypingDots, UserBubble } from "@/components/chat/Bubbles";
 import DesignChoicesCard from "@/components/chat/DesignChoicesCard";
 import { DesignChoices, chosenFormats, designChoicesSummary, designChoicesText, formatOf, renderRatiosText } from "@/render/theme";
+import { musicById } from "@/config/music";
 import { voiceById } from "@/config/voices";
 import { Button } from "@/components/ui/button";
 import { updateRecord } from "@/services/secureWriteService";
@@ -165,11 +166,13 @@ export default function ChatFilm({ projectId, autoStart = false, onStatus }: { p
       if (choices && chosenFormats(choices).length > 1) patch.render_aspect_ratios = renderRatiosText(choices);
       // The chosen narrator is saved on the film; no choice leaves it blank, which means the standard voice.
       if (choices && choices.voice !== "decide") patch.voice_id = choices.voice;
+      // The chosen background music is saved on the film; none leaves it blank, and the render adds no music.
+      if (choices && choices.music !== "none") patch.music_id = choices.music;
       if (Object.keys(patch).length) await updateRecord(ENTITY_NAMES.project, projectId, patch);
     } catch (e) {
       console.warn("[chat] couldn't save the design choices; the film will be styled automatically", e);
     }
-    const summary = choices ? designChoicesSummary(choices, voiceById(choices.voice)?.name) : "Skip, you decide";
+    const summary = choices ? designChoicesSummary(choices, voiceById(choices.voice)?.name, musicById(choices.music)?.name) : "Skip, you decide";
     setPicked(summary);
     try {
       localStorage.setItem(`cinecule.design.${projectId}`, summary);

@@ -136,8 +136,10 @@ export interface DesignChoices {
   formats: string[];
   /** "decide" (the standard voice) or an ElevenLabs voice id from src/config/voices.ts. */
   voice: string;
+  /** "none" (no music) or the id of one of the tracks in src/config/music.ts. */
+  music: string;
 }
-export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide", formats: ["wide"], voice: "decide" };
+export const NO_CHOICES: DesignChoices = { theme: "decide", background: "decide", font: "theme", layout: "balanced", pictures: "decide", length: "decide", format: "wide", formats: ["wide"], voice: "decide", music: "none" };
 
 /** The canvas the chosen format asks for. */
 export const formatOf = (id: string): FormatChoice => FORMATS.find((f) => f.id === id) ?? FORMATS[0];
@@ -294,9 +296,9 @@ export function themeGuide(): string {
 
 /**
  * What someone picked, in plain words, for showing back to them in the chat. Unlike designChoicesText (instructions for
- * the AI), this is written for the person. `voiceName` is looked up by the caller, since voices live in their own config.
+ * the AI), this is written for the person. `voiceName` and `musicName` are looked up by the caller, since voices and music live in their own config.
  */
-export function designChoicesSummary(c: DesignChoices, voiceName?: string): string {
+export function designChoicesSummary(c: DesignChoices, voiceName?: string, musicName?: string): string {
   const label = (list: { id: string; label: string }[], id: string) => list.find((x) => x.id === id)?.label ?? id;
   const lines = [
     `Theme: ${c.theme === "decide" ? "you decide" : c.theme[0].toUpperCase() + c.theme.slice(1)}`,
@@ -306,7 +308,8 @@ export function designChoicesSummary(c: DesignChoices, voiceName?: string): stri
     `Pictures: ${c.pictures === "decide" ? "you decide" : label(PICTURE_AMOUNTS, c.pictures)}`,
     `Length: ${c.length === "decide" ? "you decide" : label(LENGTHS, c.length)}`,
     `Format: ${chosenFormats(c).map((f) => f.label).join(" + ")}`,
-    `Narrator: ${voiceName ?? "standard voice"}`
+    `Narrator: ${voiceName ?? "standard voice"}`,
+    `Music: ${musicName ?? "none"}`
   ];
   return lines.join("\n");
 }
